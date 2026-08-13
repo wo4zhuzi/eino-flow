@@ -30,7 +30,7 @@ internal/rag/indexstore/postgres/ RAG Index Store 的 PostgreSQL 实现
 
 - 业务类型、规则、流程和使用方接口放在对应 Feature 内。
 - 只服务一个 Feature 的数据库映射、SQL、第三方适配器放在该 Feature 内。
-- 跨多个 Feature 且职责稳定的技术能力，才允许放到 `internal/<capability>`。
+- 跨多个业务域且职责稳定的技术能力，才允许放到 `internal/<capability>`；只在同一业务域内共享的能力放到 `internal/<domain>/<capability>`。
 - `internal/postgres` 只管理通用连接能力，不包含 RAG 表结构、业务 SQL 或发布规则。
 - `internal/rag/indexing` 负责索引构建业务流程，`internal/rag/retrieval` 负责查询与召回业务流程。
 - 索引表映射、schema 校验、事务写入、发布和查询 SQL 属于 `internal/rag/indexstore/postgres`；该包可以同时实现索引与检索使用方定义的接口。

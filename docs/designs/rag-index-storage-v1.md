@@ -413,7 +413,7 @@ V1 暂不定义 ACL 表，因为尚未确认实际主体模型和权限粒度。
 - `chunk_sets`、`chunks`、`chunk_embeddings` 的事务写入、重试、校验和原子发布。
 - `tenant_id + knowledge_base_id` 作用域贯穿入库、唯一索引和发布锁。
 - 保留稳定文档 ID、安全来源标识、内容指纹、Chunk ID、来源单元、结构 Metadata 和模型 Profile，确保后续可评测、可引用、可审计。
-- Index Store 接口使用索引构建、发布和统一候选语义，不把上层接口命名或约束为只能支持 pgvector。
+- 索引构建和检索分别在使用方定义最小 Store 接口，共享稳定候选标识等领域类型；接口使用业务语义，不命名或约束为只能支持 pgvector。
 
 本阶段不实现 ACL、关键词索引、查询生成、Rerank 或 Agent 循环。
 
