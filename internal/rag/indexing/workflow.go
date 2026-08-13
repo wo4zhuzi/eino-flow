@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
-	workflowruntime "github.com/wo4zhuzi/eino-flow/internal/platform/workflow"
+	workflowruntime "github.com/wo4zhuzi/eino-flow/internal/workflow"
 )
 
 const (
@@ -46,44 +46,44 @@ func New(ctx context.Context, dependencies Dependencies) (*Workflow, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
 	}
 
-	handlers := &workflowHandlers{
+	nodes := &workflowNodes{
 		ingestor: dependencies.Ingestor,
 		chunker:  dependencies.Chunker,
 	}
 	chain := compose.NewChain[Request, Result]()
 	chain.
 		AppendLambda(
-			compose.InvokableLambda(handlers.ingest),
+			compose.InvokableLambda(nodes.ingest),
 			compose.WithNodeKey(nodeIngestDocument),
 			compose.WithNodeName(nodeIngestDocument),
 		).
 		AppendLambda(
-			compose.InvokableLambda(handlers.chunk),
+			compose.InvokableLambda(nodes.chunk),
 			compose.WithNodeKey(nodeChunkDocument),
 			compose.WithNodeName(nodeChunkDocument),
 		).
 		AppendLambda(
-			compose.InvokableLambda(handlers.simulateEmbedding),
+			compose.InvokableLambda(nodes.simulateEmbedding),
 			compose.WithNodeKey(nodeEmbedChunks),
 			compose.WithNodeName(nodeEmbedChunks),
 		).
 		AppendLambda(
-			compose.InvokableLambda(handlers.simulatePersist),
+			compose.InvokableLambda(nodes.simulatePersist),
 			compose.WithNodeKey(nodePersistIndex),
 			compose.WithNodeName(nodePersistIndex),
 		).
 		AppendLambda(
-			compose.InvokableLambda(handlers.simulateValidate),
+			compose.InvokableLambda(nodes.simulateValidate),
 			compose.WithNodeKey(nodeValidateIndex),
 			compose.WithNodeName(nodeValidateIndex),
 		).
 		AppendLambda(
-			compose.InvokableLambda(handlers.simulatePublish),
+			compose.InvokableLambda(nodes.simulatePublish),
 			compose.WithNodeKey(nodePublishIndex),
 			compose.WithNodeName(nodePublishIndex),
 		).
 		AppendLambda(
-			compose.InvokableLambda(handlers.buildResult),
+			compose.InvokableLambda(nodes.buildResult),
 			compose.WithNodeKey(nodeBuildResult),
 			compose.WithNodeName(nodeBuildResult),
 		)

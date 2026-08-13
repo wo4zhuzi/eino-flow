@@ -15,7 +15,7 @@ import (
 	"github.com/wo4zhuzi/eino-document-chunking/strategy/structureaware"
 	ingestion "github.com/wo4zhuzi/eino-document-ingestion"
 	"github.com/wo4zhuzi/eino-document-parser-structured/markdown"
-	workflowruntime "github.com/wo4zhuzi/eino-flow/internal/platform/workflow"
+	workflowruntime "github.com/wo4zhuzi/eino-flow/internal/workflow"
 )
 
 type stubIngestor struct {

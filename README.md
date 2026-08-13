@@ -25,7 +25,7 @@
 flowchart TB
     Entry[cmd/rag-index-dev<br/>本地装配与运行入口]
 
-    subgraph Platform[公共工作流运行层]
+    subgraph Runtime[通用工作流运行能力]
         Runner[Runner<br/>Compile once / Run many]
         Governance[Descriptor / RunID<br/>Observer / OperationError]
         Runner --- Governance
@@ -60,7 +60,7 @@ flowchart TB
     class Embed,Persist,Validate,Publish simulated;
 ```
 
-公共层只管理工作流运行，不依赖 RAG 业务类型：
+`internal/workflow` 只管理工作流运行，不依赖 RAG 业务类型：
 
 - `Descriptor`：稳定的工作流名称和定义版本。
 - `RunID`：由调用入口提供的一次执行标识。
@@ -73,16 +73,21 @@ flowchart TB
 
 ```text
 .
-├── cmd/rag-index-dev/             本地运行与 Eino Dev 入口
-├── internal/platform/workflow/    公共工作流运行层
-├── internal/rag/indexing/         文档索引工作流
-├── testdata/knowledge.md           默认测试语料
-├── docs/plans/                    后续演进路线
+├── cmd/rag-index-dev/          本地运行与 Eino Dev 入口
+├── governance/                仓库治理规范
+├── internal/config/           全局运行配置、校验与脱敏
+├── internal/workflow/         通用工作流运行能力
+├── internal/rag/indexing/     RAG 文档索引 Feature
+├── testdata/knowledge.md      默认测试语料
+├── docs/plans/                后续演进路线
+├── AGENTS.md                  仓库治理规则路由
 ├── go.mod
 └── go.sum
 ```
 
-`internal/rag/indexing` 独立拥有自己的 Request、Result、Dependencies、状态和拓扑。公共运行层不知道文档、Chunk 或索引阶段是什么。
+代码按 Feature 组织：`internal/rag/indexing` 独立拥有自己的 Request、Result、Dependencies、状态和拓扑；跨 Feature 的稳定能力直接放在 `internal/<capability>`。`internal/workflow` 不知道文档、Chunk 或索引阶段，`internal/config` 只负责运行配置边界，业务包不直接读取配置源。
+
+详细的目录归属、依赖方向和 Go 编码约定见 [Go 工程规范](governance/go-engineering.md)。
 
 ## 运行
 

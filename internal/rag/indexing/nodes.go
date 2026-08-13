@@ -8,16 +8,16 @@ import (
 	ingestion "github.com/wo4zhuzi/eino-document-ingestion"
 )
 
-type workflowHandlers struct {
+type workflowNodes struct {
 	ingestor Ingestor
 	chunker  Chunker
 }
 
-func (h *workflowHandlers) ingest(ctx context.Context, request Request) (workflowState, error) {
+func (n *workflowNodes) ingest(ctx context.Context, request Request) (workflowState, error) {
 	if request.RunID == "" {
 		return workflowState{}, fmt.Errorf("%s: %w", nodeIngestDocument, ErrInvalidRunID)
 	}
-	result, err := h.ingestor.Ingest(ctx, request.SourceURI)
+	result, err := n.ingestor.Ingest(ctx, request.SourceURI)
 	if err != nil {
 		return workflowState{}, fmt.Errorf("%s: %w", nodeIngestDocument, err)
 	}
@@ -40,8 +40,8 @@ func (h *workflowHandlers) ingest(ctx context.Context, request Request) (workflo
 	}, nil
 }
 
-func (h *workflowHandlers) chunk(ctx context.Context, state workflowState) (workflowState, error) {
-	result, err := h.chunker.Chunk(ctx, state.ingested)
+func (n *workflowNodes) chunk(ctx context.Context, state workflowState) (workflowState, error) {
+	result, err := n.chunker.Chunk(ctx, state.ingested)
 	if err != nil {
 		return workflowState{}, fmt.Errorf("%s: %w", nodeChunkDocument, err)
 	}
@@ -57,7 +57,7 @@ func (h *workflowHandlers) chunk(ctx context.Context, state workflowState) (work
 	return state, nil
 }
 
-func (*workflowHandlers) simulateEmbedding(ctx context.Context, state workflowState) (workflowState, error) {
+func (*workflowNodes) simulateEmbedding(ctx context.Context, state workflowState) (workflowState, error) {
 	if err := contextError(ctx, nodeEmbedChunks); err != nil {
 		return workflowState{}, err
 	}
@@ -72,7 +72,7 @@ func (*workflowHandlers) simulateEmbedding(ctx context.Context, state workflowSt
 	return state, nil
 }
 
-func (*workflowHandlers) simulatePersist(ctx context.Context, state workflowState) (workflowState, error) {
+func (*workflowNodes) simulatePersist(ctx context.Context, state workflowState) (workflowState, error) {
 	if err := contextError(ctx, nodePersistIndex); err != nil {
 		return workflowState{}, err
 	}
@@ -85,7 +85,7 @@ func (*workflowHandlers) simulatePersist(ctx context.Context, state workflowStat
 	return state, nil
 }
 
-func (*workflowHandlers) simulateValidate(ctx context.Context, state workflowState) (workflowState, error) {
+func (*workflowNodes) simulateValidate(ctx context.Context, state workflowState) (workflowState, error) {
 	if err := contextError(ctx, nodeValidateIndex); err != nil {
 		return workflowState{}, err
 	}
@@ -98,7 +98,7 @@ func (*workflowHandlers) simulateValidate(ctx context.Context, state workflowSta
 	return state, nil
 }
 
-func (*workflowHandlers) simulatePublish(ctx context.Context, state workflowState) (workflowState, error) {
+func (*workflowNodes) simulatePublish(ctx context.Context, state workflowState) (workflowState, error) {
 	if err := contextError(ctx, nodePublishIndex); err != nil {
 		return workflowState{}, err
 	}
@@ -111,7 +111,7 @@ func (*workflowHandlers) simulatePublish(ctx context.Context, state workflowStat
 	return state, nil
 }
 
-func (*workflowHandlers) buildResult(ctx context.Context, state workflowState) (Result, error) {
+func (*workflowNodes) buildResult(ctx context.Context, state workflowState) (Result, error) {
 	if err := contextError(ctx, nodeBuildResult); err != nil {
 		return Result{}, err
 	}
