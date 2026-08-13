@@ -19,7 +19,9 @@
 
 稳定工作流标识为 `rag_document_indexing@v4`，成功状态为 `chunked_with_simulated_downstream`。
 
-PostgreSQL/GORM 连接基础设施与 RAG 索引表的只读 schema 校验已经就绪，但尚未接入上述工作流；当前运行入口仍不会连接数据库或执行索引写入。
+PostgreSQL/GORM 连接基础设施、RAG 索引表只读 schema 校验，以及基于 Eino 官方 OpenAI 组件的 `text-embedding-v4` 客户端已经就绪，但尚未接入上述工作流；当前运行入口仍不会连接模型服务、数据库或执行索引写入。
+
+Embedding 客户端固定请求 1536 维向量，并校验返回维度。阿里云兼容接口只返回请求级 Token 用量，因此当前按单条文本发起请求，以便为后续 `chunk_embeddings.embedding_token_count` 保存准确的服务端计量结果；`EMBEDDING_BATCH_SIZE` 在这一阶段控制最大并发数，合法范围为 1 到 10。
 
 ## 当前架构
 
@@ -78,6 +80,7 @@ flowchart TB
 ├── cmd/rag-index-dev/          本地运行与 Eino Dev 入口
 ├── governance/                仓库治理规范
 ├── internal/config/           全局运行配置、校验与脱敏
+├── internal/embedding/        text-embedding-v4 客户端与精确 Token 计量
 ├── internal/postgres/         PostgreSQL 通用连接与生命周期
 ├── internal/workflow/         通用工作流运行能力
 ├── internal/rag/indexing/     RAG 文档索引 Feature

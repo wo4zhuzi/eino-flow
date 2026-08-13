@@ -128,7 +128,7 @@ func testConfig(t *testing.T) appconfig.PostgreSQL {
 		appconfig.EnvPostgresConnMaxLifetime: "10m",
 		appconfig.EnvEmbeddingBaseURL:        "https://example.com/v1",
 		appconfig.EnvEmbeddingKey:            "embedding-key",
-		appconfig.EnvEmbeddingModel:          "embedding-model",
+		appconfig.EnvEmbeddingModel:          appconfig.RequiredEmbeddingModel,
 	}
 	configuration, err := appconfig.LoadFrom(func(key string) (string, bool) {
 		value, ok := environment[key]

@@ -36,9 +36,14 @@ const (
 	DefaultPostgresMaxOpenConns    = 25
 	DefaultPostgresMaxIdleConns    = 5
 	DefaultPostgresConnMaxLifetime = 30 * time.Minute
-	RequiredEmbeddingDimensions    = 1536
-	DefaultEmbeddingTimeout        = 30 * time.Second
-	DefaultEmbeddingBatchSize      = 32
+	// RequiredEmbeddingModel 是当前索引表唯一允许写入的模型空间。
+	RequiredEmbeddingModel = "text-embedding-v4"
+	// RequiredEmbeddingDimensions 是当前 vector 列和 HNSW 索引的固定维度。
+	RequiredEmbeddingDimensions = 1536
+	DefaultEmbeddingTimeout     = 30 * time.Second
+	DefaultEmbeddingBatchSize   = 10
+	// MaxEmbeddingBatchSize 是 text-embedding-v4 官方单次输入条数上限。
+	MaxEmbeddingBatchSize = 10
 )
 
 var (
@@ -184,6 +189,9 @@ func loadEmbedding(lookup LookupEnv) (Embedding, error) {
 	if err != nil {
 		return Embedding{}, err
 	}
+	if model != RequiredEmbeddingModel {
+		return Embedding{}, invalid(EnvEmbeddingModel, "必须是 text-embedding-v4")
+	}
 	dimensions, err := integer(
 		lookup,
 		EnvEmbeddingDimensions,
@@ -198,7 +206,13 @@ func loadEmbedding(lookup LookupEnv) (Embedding, error) {
 	if err != nil {
 		return Embedding{}, err
 	}
-	batchSize, err := integer(lookup, EnvEmbeddingBatchSize, DefaultEmbeddingBatchSize, 1, int(^uint(0)>>1))
+	batchSize, err := integer(
+		lookup,
+		EnvEmbeddingBatchSize,
+		DefaultEmbeddingBatchSize,
+		1,
+		MaxEmbeddingBatchSize,
+	)
 	if err != nil {
 		return Embedding{}, err
 	}

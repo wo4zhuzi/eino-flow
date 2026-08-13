@@ -102,7 +102,7 @@ func (c PostgreSQL) GoString() string {
 	return c.String()
 }
 
-// Embedding 描述 OpenAI 兼容 Embedding API 的连接和请求参数。
+// Embedding 描述 OpenAI 兼容 Embedding API 的连接、模型和并发边界。
 type Embedding struct {
 	baseURL    string
 	key        Secret

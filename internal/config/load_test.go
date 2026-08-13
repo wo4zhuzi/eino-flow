@@ -25,7 +25,7 @@ func TestLoadFromValidConfiguration(t *testing.T) {
 	environment[EnvEmbeddingBaseURL] = "https://dashscope.aliyuncs.com/compatible-mode/v1/"
 	environment[EnvEmbeddingDimensions] = "1536"
 	environment[EnvEmbeddingTimeout] = "20s"
-	environment[EnvEmbeddingBatchSize] = "16"
+	environment[EnvEmbeddingBatchSize] = "8"
 
 	configuration, err := LoadFrom(mapLookup(environment))
 	if err != nil {
@@ -53,7 +53,7 @@ func TestLoadFromValidConfiguration(t *testing.T) {
 	if embedding.Key().Reveal() != testAPIKey || embedding.Model() != "text-embedding-v4" {
 		t.Fatalf("Embedding credentials or model were not loaded")
 	}
-	if embedding.Dimensions() != 1536 || embedding.Timeout() != 20*time.Second || embedding.BatchSize() != 16 {
+	if embedding.Dimensions() != 1536 || embedding.Timeout() != 20*time.Second || embedding.BatchSize() != 8 {
 		t.Fatalf("Embedding request config = %#v", embedding)
 	}
 }
@@ -157,11 +157,13 @@ func TestLoadFromRejectsInvalidEmbeddingValues(t *testing.T) {
 		{name: "URL fragment", variable: EnvEmbeddingBaseURL, value: "https://example.com/v1#fragment"},
 		{name: "embeddings endpoint", variable: EnvEmbeddingBaseURL, value: "https://example.com/v1/embeddings"},
 		{name: "embeddings endpoint trailing slash", variable: EnvEmbeddingBaseURL, value: "https://example.com/v1/EMBEDDINGS/"},
+		{name: "unsupported model", variable: EnvEmbeddingModel, value: "text-embedding-v3"},
 		{name: "wrong dimensions", variable: EnvEmbeddingDimensions, value: "1024"},
 		{name: "invalid dimensions", variable: EnvEmbeddingDimensions, value: "many"},
 		{name: "invalid timeout", variable: EnvEmbeddingTimeout, value: "soon"},
 		{name: "negative timeout", variable: EnvEmbeddingTimeout, value: "-1s"},
 		{name: "zero batch size", variable: EnvEmbeddingBatchSize, value: "0"},
+		{name: "batch size above provider limit", variable: EnvEmbeddingBatchSize, value: "11"},
 		{name: "invalid batch size", variable: EnvEmbeddingBatchSize, value: "several"},
 	}
 
