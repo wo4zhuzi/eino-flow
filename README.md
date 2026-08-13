@@ -19,6 +19,8 @@
 
 稳定工作流标识为 `rag_document_indexing@v4`，成功状态为 `chunked_with_simulated_downstream`。
 
+PostgreSQL/GORM 连接基础设施与 RAG 索引表的只读 schema 校验已经就绪，但尚未接入上述工作流；当前运行入口仍不会连接数据库或执行索引写入。
+
 ## 当前架构
 
 ```mermaid
@@ -76,8 +78,10 @@ flowchart TB
 ├── cmd/rag-index-dev/          本地运行与 Eino Dev 入口
 ├── governance/                仓库治理规范
 ├── internal/config/           全局运行配置、校验与脱敏
+├── internal/postgres/         PostgreSQL 通用连接与生命周期
 ├── internal/workflow/         通用工作流运行能力
 ├── internal/rag/indexing/     RAG 文档索引 Feature
+│   └── postgres/              索引表映射与只读 schema 校验
 ├── testdata/knowledge.md      默认测试语料
 ├── docs/plans/                后续演进路线
 ├── AGENTS.md                  仓库治理规则路由
