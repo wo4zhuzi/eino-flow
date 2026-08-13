@@ -12,7 +12,7 @@ const (
 	chunkEmbeddingsTable = "chunk_embeddings"
 )
 
-type chunkSet struct {
+type chunkSetModel struct {
 	ID              string     `gorm:"column:id;type:uuid;primaryKey"`
 	TenantID        string     `gorm:"column:tenant_id"`
 	KnowledgeBaseID string     `gorm:"column:knowledge_base_id"`
@@ -29,11 +29,11 @@ type chunkSet struct {
 	ActivatedAt     *time.Time `gorm:"column:activated_at"`
 }
 
-func (chunkSet) TableName() string {
+func (chunkSetModel) TableName() string {
 	return chunkSetsTable
 }
 
-type chunk struct {
+type chunkModel struct {
 	ChunkSetID      string    `gorm:"column:chunk_set_id;type:uuid;primaryKey"`
 	ChunkID         string    `gorm:"column:chunk_id;primaryKey"`
 	Kind            string    `gorm:"column:kind"`
@@ -50,11 +50,11 @@ type chunk struct {
 	CreatedAt       time.Time `gorm:"column:created_at"`
 }
 
-func (chunk) TableName() string {
+func (chunkModel) TableName() string {
 	return chunksTable
 }
 
-type chunkEmbedding struct {
+type chunkEmbeddingModel struct {
 	ChunkSetID          string          `gorm:"column:chunk_set_id;type:uuid;primaryKey"`
 	ChunkID             string          `gorm:"column:chunk_id;primaryKey"`
 	ModelKey            string          `gorm:"column:model_key;primaryKey"`
@@ -67,6 +67,6 @@ type chunkEmbedding struct {
 	UpdatedAt           time.Time       `gorm:"column:updated_at"`
 }
 
-func (chunkEmbedding) TableName() string {
+func (chunkEmbeddingModel) TableName() string {
 	return chunkEmbeddingsTable
 }

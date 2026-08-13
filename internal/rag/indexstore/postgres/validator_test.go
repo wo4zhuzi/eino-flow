@@ -184,16 +184,16 @@ func TestValidatorBoundariesAndExplicitTables(t *testing.T) {
 	}
 }
 
-func TestModelsUseExplicitColumnsAndVectorType(t *testing.T) {
+func TestTableModelsUseExplicitNamesColumnsAndVectorType(t *testing.T) {
 	tests := []struct {
 		name       string
 		model      any
 		table      string
 		primaryKey []string
 	}{
-		{name: "chunk set", model: &chunkSet{}, table: chunkSetsTable, primaryKey: []string{"id"}},
-		{name: "chunk", model: &chunk{}, table: chunksTable, primaryKey: []string{"chunk_set_id", "chunk_id"}},
-		{name: "embedding", model: &chunkEmbedding{}, table: chunkEmbeddingsTable, primaryKey: []string{"chunk_set_id", "chunk_id", "model_key"}},
+		{name: "chunk set", model: &chunkSetModel{}, table: chunkSetsTable, primaryKey: []string{"id"}},
+		{name: "chunk", model: &chunkModel{}, table: chunksTable, primaryKey: []string{"chunk_set_id", "chunk_id"}},
+		{name: "embedding", model: &chunkEmbeddingModel{}, table: chunkEmbeddingsTable, primaryKey: []string{"chunk_set_id", "chunk_id", "model_key"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

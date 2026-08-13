@@ -21,7 +21,9 @@ internal/workflow/                跨 Feature 的工作流运行能力
 internal/postgres/                通用数据库连接、健康检查与生命周期
 internal/embedding/               可跨 Feature 复用的 Embedding 客户端
 internal/rag/indexing/            RAG 索引 Feature
-internal/rag/indexing/postgres/   索引 Feature 的 PostgreSQL 实现
+internal/rag/retrieval/           RAG 检索 Feature
+internal/rag/indexstore/          索引存储的稳定领域类型（存在真实共享需求时）
+internal/rag/indexstore/postgres/ RAG Index Store 的 PostgreSQL 实现
 ```
 
 目录归属规则：
@@ -30,7 +32,10 @@ internal/rag/indexing/postgres/   索引 Feature 的 PostgreSQL 实现
 - 只服务一个 Feature 的数据库映射、SQL、第三方适配器放在该 Feature 内。
 - 跨多个 Feature 且职责稳定的技术能力，才允许放到 `internal/<capability>`。
 - `internal/postgres` 只管理通用连接能力，不包含 RAG 表结构、业务 SQL 或发布规则。
-- 索引表映射、事务写入、校验和发布逻辑属于 `internal/rag/indexing/postgres`。
+- `internal/rag/indexing` 负责索引构建业务流程，`internal/rag/retrieval` 负责查询与召回业务流程。
+- 索引表映射、schema 校验、事务写入、发布和查询 SQL 属于 `internal/rag/indexstore/postgres`；该包可以同时实现索引与检索使用方定义的接口。
+- `internal/rag/indexstore` 只保存索引存储真正共享且语义稳定的领域类型；没有共享需求时不为目录完整性创建空 package。
+- GORM 表模型是 PostgreSQL 适配器的私有实现细节。查询可定义私有 Row/Projection 类型，不要求复用写入模型，也不得让业务 Feature 依赖 ORM 类型。
 - 不在顶层建立统一的 `handler/`、`service/`、`repository/`，避免横向拆散业务。
 - 不为形式完整强制每个 Feature 创建 handler、service、repository 等空层。只有职责和复杂度真实存在时才在 Feature 内拆分。
 
@@ -56,6 +61,7 @@ cmd -> 基础设施实现 -> Feature 接口和领域类型
 - 业务 Feature 不得读取环境变量或配置文件。
 - 业务代码不得依赖具体数据库 Driver、GORM、OpenAI SDK 等实现细节。
 - 位于 Feature 内的基础设施实现包可以依赖相应 SDK，并实现 Feature 定义的接口。
+- 同时服务多个 RAG Feature 的 Index Store 适配器放在 `internal/rag/indexstore/<technology>`，不得归属于任一单独使用方。
 - Feature 之间通过明确的类型或小接口协作，禁止通过全局状态、隐式注册或万能共享包耦合。
 - 发现循环依赖时应重新审视职责归属，不得通过复制类型或建立 `common` 包掩盖问题。
 

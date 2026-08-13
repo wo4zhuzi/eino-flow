@@ -272,7 +272,9 @@ Parent、Previous、Next 外键都带上 `chunk_set_id`，因此数据库能够�
 - Parent-child 命中后需要跨服务回表，增加延迟和部分失败处理。
 - 完整性校验需要分布式协调或补偿逻辑。
 
-因此，V1 在代码层可以把 PostgreSQL 实现封装为独立的 RAG Index Store，但三张表应由同一个存储模块和同一个 PostgreSQL 事务边界管理。未来即使服务化，也应该整体拆出 Index Store，而不是只拆向量表。
+因此，V1 在代码层把 PostgreSQL 实现放在 `internal/rag/indexstore/postgres`，由同一个存储模块和同一个 PostgreSQL 事务边界管理三张表。索引构建和检索分别在使用方定义最小接口，由该具体实现按需满足；`tables.go` 中的私有 GORM 表模型不暴露给业务 Feature。未来即使服务化，也应该整体拆出 Index Store，而不是只拆向量表。
+
+写入与查询共享的是数据库表契约，不是同一套业务返回模型。查询 SQL 可以在 `internal/rag/indexstore/postgres` 内定义专用 Row/Projection 类型承接联表结果、距离分数和引用信息，避免为了复用写入模型而让查询语义受表结构绑架。
 
 ### 3.6 跨表关键设计理由
 

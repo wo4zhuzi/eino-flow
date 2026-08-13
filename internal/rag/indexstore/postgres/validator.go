@@ -1,4 +1,4 @@
-// Package postgres 实现 RAG 索引 Feature 的 PostgreSQL 映射与结构校验。
+// Package postgres 实现 RAG Index Store 的 PostgreSQL 映射与结构校验。
 package postgres
 
 import (

@@ -81,7 +81,8 @@ flowchart TB
 ├── internal/postgres/         PostgreSQL 通用连接与生命周期
 ├── internal/workflow/         通用工作流运行能力
 ├── internal/rag/indexing/     RAG 文档索引 Feature
-│   └── postgres/              索引表映射与只读 schema 校验
+├── internal/rag/indexstore/   RAG 索引存储边界
+│   └── postgres/              表映射与只读 schema 校验
 ├── testdata/knowledge.md      默认测试语料
 ├── docs/plans/                后续演进路线
 ├── AGENTS.md                  仓库治理规则路由
@@ -89,7 +90,7 @@ flowchart TB
 └── go.sum
 ```
 
-代码按 Feature 组织：`internal/rag/indexing` 独立拥有自己的 Request、Result、Dependencies、状态和拓扑；跨 Feature 的稳定能力直接放在 `internal/<capability>`。`internal/workflow` 不知道文档、Chunk 或索引阶段，`internal/config` 只负责运行配置边界，业务包不直接读取配置源。
+代码按 Feature 组织：`internal/rag/indexing` 独立拥有自己的 Request、Result、Dependencies、状态和拓扑；`internal/rag/indexstore/postgres` 持有索引构建和未来检索共同依赖的 PostgreSQL 表映射与存储实现。跨业务域的稳定技术能力放在 `internal/<capability>`，RAG 域内的稳定共享能力放在 `internal/rag/<capability>`。`internal/workflow` 不知道文档、Chunk 或索引阶段，`internal/config` 只负责运行配置边界，业务包不直接读取配置源。
 
 详细的目录归属、依赖方向和 Go 编码约定见 [Go 工程规范](governance/go-engineering.md)。
 
