@@ -71,14 +71,9 @@ type Result struct {
 	TokenCount int
 }
 
-// Embedder 是 Client 对 Eino Embedding 组件依赖的最小接口。
-type Embedder interface {
-	EmbedStrings(ctx context.Context, texts []string, opts ...einocomponent.Option) ([][]float64, error)
-}
-
 // Client 为每条输入生成固定维度向量并保留精确 Token 用量。
 type Client struct {
-	embedder    Embedder
+	embedder    einocomponent.Embedder
 	dimensions  int
 	concurrency int
 }
@@ -124,7 +119,7 @@ func newWithTransport(
 	return newClient(embedder, dimensions, config.BatchSize())
 }
 
-func newClient(embedder Embedder, dimensions, concurrency int) (*Client, error) {
+func newClient(embedder einocomponent.Embedder, dimensions, concurrency int) (*Client, error) {
 	if isNil(embedder) || dimensions < 1 || concurrency < 1 || concurrency > appconfig.MaxEmbeddingBatchSize {
 		return nil, ErrInvalidConfig
 	}
