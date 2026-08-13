@@ -17,6 +17,9 @@ type chunkSet struct {
 	TenantID        string     `gorm:"column:tenant_id"`
 	KnowledgeBaseID string     `gorm:"column:knowledge_base_id"`
 	DocumentID      string     `gorm:"column:document_id"`
+	SourceURI       string     `gorm:"column:source_uri"`
+	SourceName      string     `gorm:"column:source_name"`
+	ContentSHA256   string     `gorm:"column:content_sha256"`
 	StrategyName    string     `gorm:"column:strategy_name"`
 	ProfileName     string     `gorm:"column:profile_name"`
 	ProfileVersion  string     `gorm:"column:profile_version"`

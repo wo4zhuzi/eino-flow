@@ -92,10 +92,10 @@ func TestValidatorRejectsSchemaDrift(t *testing.T) {
 			name: "missing column",
 			mutate: func(columns []databaseColumn) []databaseColumn {
 				return filterColumns(columns, func(column databaseColumn) bool {
-					return column.TableName != "chunk_sets" || column.ColumnName != "status"
+					return column.TableName != "chunk_sets" || column.ColumnName != "source_uri"
 				})
 			},
-			want: "缺少列 chunk_sets.status",
+			want: "缺少列 chunk_sets.source_uri",
 		},
 		{
 			name: "wrong vector dimensions",
@@ -216,6 +216,13 @@ func TestModelsUseExplicitColumnsAndVectorType(t *testing.T) {
 					t.Fatalf("field %s has no explicit database column", field.Name)
 				}
 			}
+			if test.name == "chunk set" {
+				for _, column := range []string{"source_uri", "source_name", "content_sha256"} {
+					if parsed.LookUpField(column) == nil {
+						t.Fatalf("chunk set missing column %q", column)
+					}
+				}
+			}
 			if test.name == "embedding" {
 				field := parsed.LookUpField("Embedding")
 				if field == nil || field.TagSettings["TYPE"] != "vector(1536)" {
@@ -266,7 +273,7 @@ func expectedColumnRows() *sqlmock.Rows {
 }
 
 func expectedColumns() []databaseColumn {
-	columns := make([]databaseColumn, 0, 35)
+	columns := make([]databaseColumn, 0, 38)
 	for tableName, table := range requiredTables {
 		for columnName, spec := range table {
 			columns = append(columns, databaseColumn{

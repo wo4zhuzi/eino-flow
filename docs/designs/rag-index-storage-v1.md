@@ -10,14 +10,14 @@ V1 负责把 Chunking 结果转换为可发布、可检索的一组 Chunk 和向
 - `chunks`：Parent、Child、Structure 等通用 Chunk。
 - `chunk_embeddings`：真正参与向量检索的 Chunk 及其 Embedding 输入。
 
-原始文件、Parser 产物、逻辑文档版本和任务队列由下游文档系统负责，不放入这三张表。Chunking 核心包仍只负责生成 Chunk，不依赖数据库、Embedding 模型或 Retriever。
+原始文件内容、Parser 产物、完整逻辑文档版本和任务队列由下游文档系统负责，不放入这三张表。`chunk_sets` 只保存引用和审计所需的安全来源标识、展示名称与内容指纹，不保存原始文件本身。Chunking 核心包仍只负责生成 Chunk，不依赖数据库、Embedding 模型或 Retriever。
 
 V1 明确包含以下扩展性基础，但不提前实现完整查询能力：
 
 - `tenant_id + knowledge_base_id` 作为所有构建、发布和查询的可信作用域；单租户部署也必须传入稳定值，例如 `default`，不能留空。
 - `chunks.metadata` 保存非安全性的内容属性，供后续语言、版本、标签和块类型过滤。
 - `(chunk_set_id, chunk_id)` 作为所有召回通道的统一候选标识，后续关键词索引可与向量索引并列扩展。
-- `source_unit_ids` 和结构 Metadata 保留引用追踪基础；用户可读引用仍需在查询工作流设计中确定与文档系统的解析契约。
+- `chunk_sets.source_uri + source_name`、`source_unit_ids` 和结构 Metadata 共同保留引用追踪基础；用户可读引用仍需在查询工作流设计中确定与文档系统的解析契约。
 
 V1 不包含用户、角色、用户组 ACL，也不包含关键词索引、Rerank 或答案生成。原因不是这些能力不重要，而是 ACL 依赖实际身份模型，中文关键词检索依赖分词与数据库扩展选型；在这些约束未确认前写死实现会形成错误兼容承诺。
 
@@ -48,6 +48,10 @@ CREATE TABLE chunk_sets (
     tenant_id       text NOT NULL CHECK (btrim(tenant_id) <> ''),
     knowledge_base_id text NOT NULL CHECK (btrim(knowledge_base_id) <> ''),
     document_id     text NOT NULL CHECK (btrim(document_id) <> ''),
+    source_uri      text NOT NULL CHECK (btrim(source_uri) <> ''),
+    source_name     text NOT NULL CHECK (btrim(source_name) <> ''),
+    content_sha256  text NOT NULL
+                    CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
     strategy_name   text NOT NULL CHECK (btrim(strategy_name) <> ''),
     profile_name    text NOT NULL CHECK (btrim(profile_name) <> ''),
     profile_version text NOT NULL CHECK (btrim(profile_version) <> ''),
@@ -172,6 +176,9 @@ erDiagram
 | `tenant_id` | 租户隔离标识 | 属于安全边界和所有查询必带条件，不能放入可选 JSONB。单租户部署使用固定值，避免以后增加租户时修改主索引和调用契约。 |
 | `knowledge_base_id` | 租户内知识库或语料集合标识 | 用于路由检索范围、知识库级授权和容量治理；同一个 `document_id` 可以安全存在于不同知识库。 |
 | `document_id` | 关联外部文档系统中的逻辑文档 | 本设计不拥有原始文档，因此只保存作用域内稳定的业务标识，不建立到外部系统的数据库外键。 |
+| `source_uri` | 保存稳定且安全的逻辑来源标识 | 用于引用解析、重新摄取和问题定位；不得保存宿主机绝对路径、认证信息、临时签名参数或其他秘密。实际抓取地址只在运行时使用。 |
+| `source_name` | 保存用户可读的来源名称 | 引用展示不应依赖解析 URI，也不能假设 URI 的最后一段始终是有效文件名。它是展示名称，不作为文档身份或唯一键。 |
+| `content_sha256` | 标识本次构建使用的原文内容 | 同一逻辑文档可以产生多个内容版本；内容指纹用于审计、幂等判断和确认引用对应的原文版本。 |
 | `strategy_name` | 标识 `parent_child`、`structure_aware` 等切分策略 | 同一文档可以同时维护不同检索策略；发布锁和唯一活动版本都按“租户 + 知识库 + 文档 + 策略”隔离。 |
 | `profile_name` | 标识一套具名配置 | 便于区分默认配置、长文配置等可读用途，而不是只保存难以识别的 JSON。 |
 | `profile_version` | 标识配置语义版本 | 配置或 Embedding 输入规则变化后必须产生新版本，避免同名 Profile 在不同时间产生不可复现的结果。 |
@@ -199,6 +206,8 @@ erDiagram
 `uq_chunk_sets_active` 使用部分唯一索引，保证同一个 `tenant_id + knowledge_base_id + document_id + strategy_name` 最多只有一个活动版本。它是数据库层的最终一致性保护；正常发布仍需 advisory lock，因为发布过程还要同步修改新旧 Set 的向量可检索状态。
 
 这里有一个明确语义：同一作用域内的同一文档、同一策略在任意时刻只有一个活动 Profile。如果未来需要让多个 Profile 同时在线并由调用方选择，唯一键和发布锁范围都必须再加入 `profile_name`，不能只改查询条件。
+
+`source_uri` 不是任意抓取地址。HTTP URL 入库前必须移除 UserInfo、签名参数和其他敏感查询参数；本地文件必须转换为文档系统可解析的逻辑 URI，不能把 `/Users/...`、`/data/private/...` 等部署绝对路径持久化。发生重定向后的 `resolved_uri` 可能短期有效或包含签名，因此不进入数据库。无法生成安全稳定来源标识时，入库请求必须失败，不能退化为保存原始抓取地址。
 
 ### 3.3 `chunks`：正文、顺序和结构关系
 
@@ -269,6 +278,7 @@ Parent、Previous、Next 外键都带上 `chunk_set_id`，因此数据库能够�
 
 - `chunk_set_id + chunk_id` 作为 Chunk 主键，允许相同的确定性 Chunk ID 出现在不同构建版本中，关系外键始终限制在同一个 Set 内。
 - `tenant_id` 和 `knowledge_base_id` 放在 `chunk_sets`，避免每个 Chunk 重复保存作用域；所有检索必须先联接有效 Set 并带上这两个条件，不能只查询向量表。
+- `source_uri`、`source_name` 和 `content_sha256` 放在 `chunk_sets`，因为它们描述本次文档构建，不应在每个 Chunk 的 Metadata 中重复保存。
 - `strategy_name` 和 `kind` 使用字符串而不是数据库枚举，新增策略时不需要修改表结构；策略与 Kind、Level、Parent 的组合合法性由写入校验负责。
 - `metadata` 保存策略专用字段。只有某个字段形成稳定、高频的过滤或排序需求后，才提升为普通列或表达式索引。
 - `input_sha256` 对最终 `embedding_text` 计算，用于跳过重复模型调用；`model_key` 必须唯一对应模型、维度、距离算法和配置版本。
@@ -324,7 +334,7 @@ SemanticPath 为空：直接使用 chunk.Content
 
 ### 5.1 构建写入
 
-1. 调用方必须提供可信的 `tenant_id` 和 `knowledge_base_id`。入库层再按 `Chunk.DocumentID` 对 `chunking.Result` 分组，为每个作用域、文档和策略创建一个 `status=building` 的 Chunk Set。`chunk_set_id` 由任务首次创建并持久保存，重试必须复用该 ID。
+1. 调用方必须提供可信的 `tenant_id`、`knowledge_base_id`、`document_id`，以及经过安全规范化的 `source_uri`、`source_name` 和 `content_sha256`。入库层再按 `Chunk.DocumentID` 对 `chunking.Result` 分组，为每个作用域、文档和策略创建一个 `status=building` 的 Chunk Set。`chunk_set_id` 由任务首次创建并持久保存，重试必须复用该 ID。
 2. 在事务中写入该组全部 Chunk。空字符串关系转换为 `NULL`；保留原始 `Sequence`，分组后即使有间隔也不重新编号。
 3. 根据策略选择应向量化的 Chunk，生成 `embedding_text`、Token 数和 SHA-256，再写入 `chunk_embeddings`。构建阶段统一保持 `searchable=false`。
 4. 同一个 `chunk_set_id + chunk_id + model_key` 使用 Upsert。Hash 未变化时跳过 Embedding 调用；Hash 变化时更新文本、Token 数、Hash、向量和 `updated_at`。
@@ -338,6 +348,7 @@ Chunking Result 已经执行过结构和关系校验，入库层仍需再次校�
 - Parent-child 的所有 Child、Structure-aware 的所有 Structure，都必须存在指定 `model_key` 的向量；Parent 不得进入 V1 主向量索引。
 - `profile_name + profile_version` 必须对应同一份规范化配置。V1 由统一写入服务在事务锁内校验；出现多个独立写入方后再拆出 Profile 表。
 - `tenant_id` 和 `knowledge_base_id` 只能来自经过认证的服务端上下文或可信任务载荷，不能从 Chunk Metadata 推导，也不能接受最终用户任意声明。
+- `source_uri` 必须来自可信文档系统或经过安全规范化的任务载荷；入库层必须拒绝包含认证信息、敏感查询参数或部署绝对路径的值。
 
 ### 5.2 原子发布
 
@@ -399,7 +410,7 @@ V1 暂不定义 ACL 表，因为尚未确认实际主体模型和权限粒度。
 - Embedding 输入构建、Token 统计和 Hash 去重。
 - `chunk_sets`、`chunks`、`chunk_embeddings` 的事务写入、重试、校验和原子发布。
 - `tenant_id + knowledge_base_id` 作用域贯穿入库、唯一索引和发布锁。
-- 保留稳定 Chunk ID、来源单元、结构 Metadata 和模型 Profile，确保后续可评测、可引用。
+- 保留稳定文档 ID、安全来源标识、内容指纹、Chunk ID、来源单元、结构 Metadata 和模型 Profile，确保后续可评测、可引用、可审计。
 - Index Store 接口使用索引构建、发布和统一候选语义，不把上层接口命名或约束为只能支持 pgvector。
 
 本阶段不实现 ACL、关键词索引、查询生成、Rerank 或 Agent 循环。
