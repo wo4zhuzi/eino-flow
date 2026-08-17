@@ -19,7 +19,7 @@
 
 稳定工作流标识为 `rag_document_indexing@v4`，成功状态为 `chunked_with_simulated_downstream`。
 
-PostgreSQL/GORM 连接基础设施、RAG 索引表只读 schema 校验，以及基于 Eino 官方 OpenAI 组件的 `text-embedding-v4` 客户端已经就绪，但尚未接入上述工作流；当前运行入口仍不会连接模型服务、数据库或执行索引写入。
+PostgreSQL/GORM 连接基础设施、RAG 索引表 schema 校验、building Set 持久化，以及基于 Eino 官方 OpenAI 组件的 `text-embedding-v4` 客户端已经就绪，但尚未接入上述工作流；当前运行入口仍不会连接模型服务、数据库或执行索引写入。
 
 Embedding 客户端固定请求 1536 维向量，并校验返回维度。阿里云兼容接口只返回请求级 Token 用量，因此当前按单条文本发起请求，以便为后续 `chunk_embeddings.embedding_token_count` 保存准确的服务端计量结果；`EMBEDDING_BATCH_SIZE` 在这一阶段控制最大并发数，合法范围为 1 到 10。
 
@@ -64,6 +64,88 @@ flowchart TB
     class Embed,Persist,Validate,Publish simulated;
 ```
 
+## 索引存储核心逻辑
+
+以下是已经实现、但尚待真实工作流接入的索引构建与存储链路：
+
+```mermaid
+flowchart TB
+    Spec[BuildSpec<br/>作用域、文档、Chunk 配置、模型配置]
+    ChunkResult[Chunking Result<br/>Chunk 内容与关系]
+
+    subgraph Module04[模块 04：入库前统一组装]
+        MapBuild[MapBuild<br/>校验并规范化输入]
+        BuildData[BuildData<br/>Set + Chunks + EmbeddingInputs]
+        Hash[生成 model_key<br/>生成文本 input_sha256]
+
+        MapBuild --> Hash --> BuildData
+    end
+
+    subgraph Module05[模块 05：PostgreSQL 持久化]
+        Prepare[PrepareBuild 短事务<br/>写入 Set、对齐完整 Chunk 快照]
+        Compare{相同 Set、Chunk、model_key 下<br/>input_sha256 是否一致}
+        Reuse[复用已有向量<br/>不调用模型]
+        Missing[返回缺失或变化的<br/>EmbeddingInput]
+        Save[SaveEmbeddings 短事务<br/>Upsert 向量并设置 searchable=false]
+
+        Prepare --> Compare
+        Compare -->|一致| Reuse
+        Compare -->|不存在或变化| Missing
+    end
+
+    Embed[Embedding Client<br/>事务外生成向量和 Token 数<br/>待模块 07 接入]
+
+    subgraph PostgreSQL[PostgreSQL]
+        Sets[(chunk_sets<br/>构建版本与状态)]
+        Chunks[(chunks<br/>正文与关系)]
+        Embeddings[(chunk_embeddings<br/>文本、Hash、向量)]
+    end
+
+    Spec --> MapBuild
+    ChunkResult --> MapBuild
+    BuildData --> Prepare
+    Prepare --> Sets
+    Prepare --> Chunks
+    Embeddings --> Compare
+    Missing --> Embed --> Save --> Embeddings
+```
+
+向量记录使用 `(chunk_set_id, chunk_id, model_key)` 标识一个 Chunk 在特定模型空间中的当前向量；`input_sha256` 是最终 Embedding 文本的 Hash，用于判断已有向量能否复用。模型或模型配置变化会生成新的 `model_key`，文本变化会生成新的 `input_sha256`，任一变化都需要重新生成向量。
+
+`PrepareBuild` 和 `SaveEmbeddings` 分别使用短事务，Embedding 网络请求位于两个事务之间，避免模型调用长时间占用数据库锁。当前默认工作流仍使用模拟节点，模块 07 接入完成后才会实际执行这条链路。
+
+### 文档身份与索引版本生命周期
+
+`document_id` 表示一篇文章的稳定业务身份，`content_sha256` 表示该文章当前的内容版本，`chunk_set_id` 表示一次独立的索引构建。相同文章重新构建时保留 `document_id`，并创建新的 Set UUID。
+
+```mermaid
+flowchart TB
+    Identity[可信文档身份<br/>tenant_id + knowledge_base_id + document_id]
+    ContentA[文章内容版本 A<br/>content_sha256=A]
+    ContentB[文章内容版本 B<br/>content_sha256=B 或与 A 相同]
+
+    Identity --> SetA[Set A<br/>独立 chunk_set_id]
+    Identity --> SetB[Set B<br/>新的 chunk_set_id]
+    ContentA --> SetA
+    ContentB --> SetB
+
+    SetA --> ActiveA[Set A：active<br/>向量 searchable=true]
+    SetB --> BuildingB[Set B：building<br/>向量 searchable=false]
+
+    ActiveA --> Before[发布前召回<br/>只使用 Set A]
+    BuildingB -. 不参与召回 .-> Before
+
+    ActiveA --> Publish{Set B 校验通过<br/>发布事务原子切换}
+    BuildingB --> Publish
+
+    Publish --> RetiredA[Set A：retired<br/>向量 searchable=false]
+    Publish --> ActiveB[Set B：active<br/>向量 searchable=true]
+    ActiveB --> After[发布后召回<br/>只使用 Set B]
+    RetiredA -. 不参与召回 .-> After
+```
+
+发布以完整 Set 为单位，不会只切换部分 Chunk。Retriever 必须在数据库查询阶段同时约束可信作用域、`chunk_sets.status='active'`、`chunk_embeddings.searchable=true` 和目标 `model_key`，避免 building 或 retired 版本进入向量候选集。当前模块 05 只负责写入 building Set；校验发布属于模块 06，真实工作流接入属于模块 07，二者尚未完成。
+
 `internal/workflow` 只管理工作流运行，不依赖 RAG 业务类型：
 
 - `Descriptor`：稳定的工作流名称和定义版本。
@@ -85,7 +167,7 @@ flowchart TB
 ├── internal/workflow/         通用工作流运行能力
 ├── internal/rag/indexing/     RAG 文档索引 Feature
 ├── internal/rag/indexstore/   RAG 索引存储边界
-│   └── postgres/              表映射与只读 schema 校验
+│   └── postgres/              表映射、schema 校验与构建持久化
 ├── testdata/knowledge.md      默认测试语料
 ├── docs/plans/                后续演进路线
 ├── AGENTS.md                  仓库治理规则路由
