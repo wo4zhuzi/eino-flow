@@ -3,8 +3,11 @@ package postgres
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +188,197 @@ func TestStoreConfiguredDatabaseLifecycle(t *testing.T) {
 	if active.Status != "active" || active.ActivatedAt == nil || !activeSearchable {
 		t.Fatalf("active Set changed: status:%s activated:%v searchable:%v", active.Status, active.ActivatedAt, activeSearchable)
 	}
+
+	publishPaused := make(chan struct{})
+	publishResume := make(chan struct{})
+	var pauseOnce sync.Once
+	var resumeOnce sync.Once
+	releasePublish := func() { resumeOnce.Do(func() { close(publishResume) }) }
+	defer releasePublish()
+	callbackName := "test:publish-no-gap:" + string(build.Set.ID)
+	if err := db.Callback().Update().After("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if strings.Trim(tx.Statement.Table, `"`) != chunkSetsTable {
+			return
+		}
+		pauseOnce.Do(func() {
+			close(publishPaused)
+			<-publishResume
+		})
+	}); err != nil {
+		t.Fatalf("register publish callback error = %v", err)
+	}
+	defer func() {
+		if err := db.Callback().Update().Remove(callbackName); err != nil {
+			t.Errorf("remove publish callback error = %v", err)
+		}
+	}()
+	publishResult := make(chan error, 1)
+	go func() {
+		publishResult <- store.Publish(ctx, build.Set.ID)
+	}()
+	select {
+	case <-publishPaused:
+	case <-ctx.Done():
+		t.Fatalf("Publish() did not reach atomic switch: %v", ctx.Err())
+	}
+	var visibleBeforeCommit int64
+	visibilitySQL := fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s AS sets
+		JOIN %s AS embeddings ON embeddings.chunk_set_id = sets.id
+		WHERE sets.tenant_id = ? AND sets.knowledge_base_id = ? AND sets.document_id = ?
+		AND sets.strategy_name = ? AND sets.status = ? AND embeddings.searchable = true`,
+		tables.ChunkSets,
+		tables.ChunkEmbeddings,
+	)
+	if err := db.WithContext(ctx).Raw(
+		visibilitySQL,
+		build.Set.Scope.TenantID,
+		build.Set.Scope.KnowledgeBaseID,
+		build.Set.Document.ID,
+		build.Set.StrategyName,
+		setStatusActive,
+	).Scan(&visibleBeforeCommit).Error; err != nil {
+		t.Fatalf("query visibility during Publish error = %v", err)
+	}
+	if visibleBeforeCommit == 0 {
+		t.Fatal("Publish transaction exposed a retrieval gap before commit")
+	}
+	releasePublish()
+	if err := <-publishResult; err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if err := db.WithContext(ctx).Table(tables.ChunkSets).Where("id = ?", string(build.Set.ID)).Take(&building).Error; err != nil {
+		t.Fatalf("query published Set error = %v", err)
+	}
+	if err := db.WithContext(ctx).Table(tables.ChunkSets).Where("id = ?", string(activeID)).Take(&active).Error; err != nil {
+		t.Fatalf("query retired Set error = %v", err)
+	}
+	var publishedSearchable int64
+	if err := db.WithContext(ctx).Table(tables.ChunkEmbeddings).
+		Where("chunk_set_id = ? AND searchable = true", string(build.Set.ID)).
+		Count(&publishedSearchable).Error; err != nil {
+		t.Fatalf("count published Embeddings error = %v", err)
+	}
+	var retiredSearchable int64
+	if err := db.WithContext(ctx).Table(tables.ChunkEmbeddings).
+		Where("chunk_set_id = ? AND searchable = true", string(activeID)).
+		Count(&retiredSearchable).Error; err != nil {
+		t.Fatalf("count retired Embeddings error = %v", err)
+	}
+	if building.Status != setStatusActive || building.ActivatedAt == nil ||
+		active.Status != setStatusRetired || publishedSearchable != 2 || retiredSearchable != 0 {
+		t.Fatalf(
+			"published snapshot = new:%s/%v/%d old:%s/%d",
+			building.Status,
+			building.ActivatedAt,
+			publishedSearchable,
+			active.Status,
+			retiredSearchable,
+		)
+	}
+	if err := store.Publish(ctx, build.Set.ID); !errors.Is(err, indexing.ErrBuildConflict) {
+		t.Fatalf("Publish(retry) error = %v, want ErrBuildConflict", err)
+	}
+}
+
+func TestStoreConfiguredDatabaseConcurrentPublish(t *testing.T) {
+	if os.Getenv("EINO_FLOW_POSTGRES_INTEGRATION") != "1" {
+		t.Skip("需要显式注入运行环境并设置 EINO_FLOW_POSTGRES_INTEGRATION=1")
+	}
+	configuration, err := appconfig.Load()
+	if err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := dbpostgres.Open(ctx, configuration.PostgreSQL())
+	if err != nil {
+		t.Fatalf("postgres.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("postgres.Close() error = %v", err)
+		}
+	})
+	db, err := client.DB()
+	if err != nil {
+		t.Fatalf("postgres.DB() error = %v", err)
+	}
+	store, err := NewStore(db, configuration.PostgreSQL().Schema())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	tables, err := newTables(configuration.PostgreSQL().Schema())
+	if err != nil {
+		t.Fatalf("newTables() error = %v", err)
+	}
+
+	testSuffix := string(integrationUUID(t))
+	base := validStoreBuild()
+	base.Set.Scope.TenantID = "concurrent-" + testSuffix
+	base.Set.Scope.KnowledgeBaseID = "kb-same"
+	base.Set.Document.ID = "document-same"
+	base.Set.Document.SourceURI = "knowledge://documents/" + testSuffix
+	base.Set.Profile.Name = "profile-" + testSuffix
+	baseline := integrationBuildForSet(base, integrationUUID(t))
+	first := integrationBuildForSet(base, integrationUUID(t))
+	second := integrationBuildForSet(base, integrationUUID(t))
+	differentFirst := integrationBuildForSet(base, integrationUUID(t))
+	differentFirst.Set.Scope.KnowledgeBaseID = "kb-different-1"
+	differentFirst.Set.Document.ID = "document-different-1"
+	differentSecond := integrationBuildForSet(base, integrationUUID(t))
+	differentSecond.Set.Scope.KnowledgeBaseID = "kb-different-2"
+	differentSecond.Set.Document.ID = "document-different-2"
+	allBuilds := []indexing.BuildData{baseline, first, second, differentFirst, differentSecond}
+	ids := make([]string, len(allBuilds))
+	for index, build := range allBuilds {
+		ids[index] = string(build.Set.ID)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := db.WithContext(cleanupCtx).Table(tables.ChunkSets).
+			Where("id IN ?", ids).Delete(&chunkSetModel{}).Error; err != nil {
+			t.Errorf("清理并发集成测试 Set 失败: %v", err)
+		}
+	})
+
+	for _, build := range allBuilds {
+		persistIntegrationBuild(t, ctx, store, build)
+	}
+	if err := store.Publish(ctx, baseline.Set.ID); err != nil {
+		t.Fatalf("Publish(baseline) error = %v", err)
+	}
+
+	assertConcurrentPublish(t, ctx, store, []indexstore.SetID{first.Set.ID, second.Set.ID})
+	var activeCount int64
+	if err := db.WithContext(ctx).Table(tables.ChunkSets).
+		Where(
+			"tenant_id = ? AND knowledge_base_id = ? AND document_id = ? AND strategy_name = ? AND status = ?",
+			base.Set.Scope.TenantID,
+			base.Set.Scope.KnowledgeBaseID,
+			base.Set.Document.ID,
+			base.Set.StrategyName,
+			setStatusActive,
+		).
+		Count(&activeCount).Error; err != nil {
+		t.Fatalf("count same-scope active Sets error = %v", err)
+	}
+	if activeCount != 1 {
+		t.Fatalf("same-scope active Set count = %d, want 1", activeCount)
+	}
+
+	assertConcurrentPublish(t, ctx, store, []indexstore.SetID{differentFirst.Set.ID, differentSecond.Set.ID})
+	for _, build := range []indexing.BuildData{differentFirst, differentSecond} {
+		var published chunkSetModel
+		if err := db.WithContext(ctx).Table(tables.ChunkSets).
+			Where("id = ?", string(build.Set.ID)).Take(&published).Error; err != nil {
+			t.Fatalf("query different-scope Set error = %v", err)
+		}
+		if published.Status != setStatusActive || published.ActivatedAt == nil {
+			t.Fatalf("different-scope Set = %s/%v, want active", published.Status, published.ActivatedAt)
+		}
+	}
 }
 
 func insertIntegrationActiveSet(
@@ -226,7 +420,7 @@ func insertIntegrationActiveSet(
 			Content:        "旧父块",
 			CharacterCount: 3,
 			TokenCount:     2,
-			SourceUnitIDs:  []string{"unit-old"},
+			SourceUnitIDs:  textArray{"unit-old"},
 			Metadata:       []byte(`{}`),
 		},
 		{
@@ -239,7 +433,7 @@ func insertIntegrationActiveSet(
 			Content:        "旧子块",
 			CharacterCount: 3,
 			TokenCount:     2,
-			SourceUnitIDs:  []string{"unit-old"},
+			SourceUnitIDs:  textArray{"unit-old"},
 			Metadata:       []byte(`{}`),
 		},
 	}
@@ -271,6 +465,57 @@ func integrationEmbeddingRecord(input indexing.EmbeddingInput) indexing.Embeddin
 		EmbeddingInput: input,
 		TokenCount:     8,
 		Vector:         vector,
+	}
+}
+
+func integrationBuildForSet(build indexing.BuildData, setID indexstore.SetID) indexing.BuildData {
+	build.Set.ID = setID
+	build.Chunks = append([]indexing.ChunkRecord(nil), build.Chunks...)
+	for index := range build.Chunks {
+		build.Chunks[index].Candidate.SetID = setID
+	}
+	build.EmbeddingInputs = append([]indexing.EmbeddingInput(nil), build.EmbeddingInputs...)
+	for index := range build.EmbeddingInputs {
+		build.EmbeddingInputs[index].Candidate.SetID = setID
+	}
+	return build
+}
+
+func persistIntegrationBuild(t *testing.T, ctx context.Context, store *Store, build indexing.BuildData) {
+	t.Helper()
+	missing, err := store.PrepareBuild(ctx, build)
+	if err != nil {
+		t.Fatalf("PrepareBuild() error = %v", err)
+	}
+	records := make([]indexing.EmbeddingRecord, len(missing))
+	for index, input := range missing {
+		records[index] = integrationEmbeddingRecord(input)
+	}
+	if err := store.SaveEmbeddings(ctx, build.Set.ID, records); err != nil {
+		t.Fatalf("SaveEmbeddings() error = %v", err)
+	}
+}
+
+func assertConcurrentPublish(t *testing.T, ctx context.Context, store *Store, setIDs []indexstore.SetID) {
+	t.Helper()
+	start := make(chan struct{})
+	errorsBySet := make(chan error, len(setIDs))
+	var wait sync.WaitGroup
+	for _, setID := range setIDs {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			errorsBySet <- store.Publish(ctx, setID)
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsBySet)
+	for err := range errorsBySet {
+		if err != nil {
+			t.Fatalf("concurrent Publish() error = %v", err)
+		}
 	}
 }
 

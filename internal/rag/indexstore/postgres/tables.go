@@ -1,8 +1,12 @@
 package postgres
 
 import (
+	"database/sql/driver"
+	"fmt"
+	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgvector/pgvector-go"
 )
 
@@ -45,7 +49,7 @@ type chunkModel struct {
 	Content         string    `gorm:"column:content"`
 	CharacterCount  int       `gorm:"column:character_count"`
 	TokenCount      int       `gorm:"column:token_count"`
-	SourceUnitIDs   []string  `gorm:"column:source_unit_ids;type:text[]"`
+	SourceUnitIDs   textArray `gorm:"column:source_unit_ids;type:text[]"`
 	Metadata        []byte    `gorm:"column:metadata;type:jsonb"`
 	CreatedAt       time.Time `gorm:"column:created_at"`
 }
@@ -69,4 +73,51 @@ type chunkEmbeddingModel struct {
 
 func (chunkEmbeddingModel) TableName() string {
 	return chunkEmbeddingsTable
+}
+
+type textArray []string
+
+var textArrayMapPool = sync.Pool{New: func() any { return pgtype.NewMap() }}
+
+func (values textArray) Value() (driver.Value, error) {
+	typeMap := textArrayMapPool.Get().(*pgtype.Map)
+	defer textArrayMapPool.Put(typeMap)
+	encoded, err := typeMap.Encode(
+		pgtype.TextArrayOID,
+		pgtype.TextFormatCode,
+		pgtype.FlatArray[string](values),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("编码 PostgreSQL text[]: %w", err)
+	}
+	return encoded, nil
+}
+
+func (values *textArray) Scan(source any) error {
+	if values == nil {
+		return fmt.Errorf("扫描 PostgreSQL text[]: 目标不能为空")
+	}
+	if source == nil {
+		*values = nil
+		return nil
+	}
+	var encoded []byte
+	switch typed := source.(type) {
+	case string:
+		encoded = []byte(typed)
+	case []byte:
+		encoded = typed
+	default:
+		return fmt.Errorf("扫描 PostgreSQL text[]: 不支持来源类型 %T", source)
+	}
+
+	typeMap := textArrayMapPool.Get().(*pgtype.Map)
+	defer textArrayMapPool.Put(typeMap)
+	var decoded pgtype.FlatArray[string]
+	if err := typeMap.Scan(pgtype.TextArrayOID, pgtype.TextFormatCode, encoded, &decoded); err != nil {
+		return fmt.Errorf("扫描 PostgreSQL text[]: %w", err)
+	}
+	*values = append((*values)[:0], decoded...)
+	return nil
 }

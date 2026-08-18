@@ -20,7 +20,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const setStatusBuilding = "building"
+const (
+	setStatusBuilding = "building"
+	setStatusActive   = "active"
+	setStatusRetired  = "retired"
+)
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -219,7 +223,7 @@ func (s *Store) reconcileChunks(tx *gorm.DB, build indexing.BuildData) error {
 			Content:         chunk.Content,
 			CharacterCount:  chunk.CharacterCount,
 			TokenCount:      chunk.TokenCount,
-			SourceUnitIDs:   append([]string(nil), chunk.SourceUnitIDs...),
+			SourceUnitIDs:   textArray(append([]string(nil), chunk.SourceUnitIDs...)),
 			Metadata:        append([]byte(nil), chunk.Metadata...),
 		}
 	}

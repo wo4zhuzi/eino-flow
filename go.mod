@@ -7,6 +7,7 @@ require (
 	github.com/cloudwego/eino v0.9.12
 	github.com/cloudwego/eino-ext/components/embedding/openai v0.0.0-20260813030315-32635d4ae67d
 	github.com/cloudwego/eino-ext/devops v0.1.9
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pgvector/pgvector-go v0.4.1
 	github.com/wo4zhuzi/eino-document-chunking v0.0.0-20260809141624-c95264b0c1fe
 	github.com/wo4zhuzi/eino-document-ingestion v0.0.0-20260809134505-3e413ddcc4db
@@ -35,7 +36,6 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.10.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect

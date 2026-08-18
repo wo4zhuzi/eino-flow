@@ -123,4 +123,5 @@ type BuildData struct {
 type Store interface {
 	PrepareBuild(ctx context.Context, build BuildData) ([]EmbeddingInput, error)
 	SaveEmbeddings(ctx context.Context, setID indexstore.SetID, records []EmbeddingRecord) error
+	Publish(ctx context.Context, setID indexstore.SetID) error
 }

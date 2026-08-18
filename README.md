@@ -144,7 +144,7 @@ flowchart TB
     RetiredA -. 不参与召回 .-> After
 ```
 
-发布以完整 Set 为单位，不会只切换部分 Chunk。Retriever 必须在数据库查询阶段同时约束可信作用域、`chunk_sets.status='active'`、`chunk_embeddings.searchable=true` 和目标 `model_key`，避免 building 或 retired 版本进入向量候选集。当前模块 05 只负责写入 building Set；校验发布属于模块 06，真实工作流接入属于模块 07，二者尚未完成。
+发布以完整 Set 为单位，不会只切换部分 Chunk。Retriever 必须在数据库查询阶段同时约束可信作用域、`chunk_sets.status='active'`、`chunk_embeddings.searchable=true` 和目标 `model_key`，避免 building 或 retired 版本进入向量候选集。模块 05 已实现 building Set 写入，模块 06 已实现事务内完整性校验、作用域 advisory lock 和无空窗原子发布；真实工作流接入属于模块 07，尚未完成。
 
 `internal/workflow` 只管理工作流运行，不依赖 RAG 业务类型：
 

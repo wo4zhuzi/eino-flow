@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -230,6 +231,24 @@ func TestTableModelsUseExplicitNamesColumnsAndVectorType(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTextArrayDatabaseRoundTrip(t *testing.T) {
+	original := textArray{"unit-1", "unit,2", `unit"3`, `unit\\4`}
+	encoded, err := original.Value()
+	if err != nil {
+		t.Fatalf("textArray.Value() error = %v", err)
+	}
+	var decoded textArray
+	if err := decoded.Scan(encoded); err != nil {
+		t.Fatalf("textArray.Scan() error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded, original) {
+		t.Fatalf("textArray round trip = %#v, want %#v", decoded, original)
+	}
+	if err := decoded.Scan(nil); err != nil || decoded != nil {
+		t.Fatalf("textArray.Scan(nil) = %#v, %v", decoded, err)
 	}
 }
 
