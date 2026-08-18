@@ -229,6 +229,19 @@ go vet ./...
 
 默认测试使用内存替身，不访问真实数据库或模型服务。测试覆盖 Markdown Structure-aware、TXT Parent-child、真实节点调用顺序、稳定 ID、同 Set 重试复用、输入不可变性、错误链、超大原子块和公共 Runner 并发复用。
 
+真实端到端验收需要显式注入 PostgreSQL 与 Embedding 配置，并单独开启外部测试。以下命令会使用 UUID 隔离租户，结束后按租户清理 Set、Chunk 和 Embedding；输出不包含密码、API Key、正文或向量：
+
+```bash
+set -a
+source .env
+set +a
+EINO_FLOW_WORKFLOW_E2E=1 EINO_FLOW_POSTGRES_INTEGRATION=1 \
+  go test ./internal/rag/indexstore/postgres -count=1 \
+  -run 'TestValidateConfiguredDatabase|TestStoreConfiguredDatabaseLifecycle|TestStoreConfiguredDatabaseConcurrentPublish|TestWorkflowConfiguredEndToEnd' -v
+```
+
+该验收覆盖真实 Markdown Structure-aware 与 TXT Parent-child 构建、发布前中断后的同 Set 重试与向量复用、内容变更后的新旧 Set 原子切换，以及 Embedding 失败不影响已有 active Set。不开启 `EINO_FLOW_WORKFLOW_E2E=1` 时，普通测试不会访问真实外部依赖。
+
 ## 后续演进
 
 真实索引下游的入库边界、表结构、写入校验和发布流程见 [RAG 索引入库设计 V1](docs/designs/rag-index-storage-v1.md)。其余后续方向维护在 [演进计划](docs/plans/2026-08-11-demo19-rag-migration.md)中。当前范围不包含 RAG 查询工作流、混合检索、Rerank 或 Agent。

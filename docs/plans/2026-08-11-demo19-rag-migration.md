@@ -27,7 +27,7 @@
 
 已用真实 Embedding、索引存储、校验和发布替换模拟节点，形成支持同 Set 重试复用的数据写入闭环。
 
-V1 的入库边界、表结构、Embedding 写入、校验和原子发布方案记录在 [RAG 索引入库设计 V1](../designs/rag-index-storage-v1.md)。真实 PostgreSQL 与 Embedding API 的端到端验收由独立验收模块执行。
+V1 的入库边界、表结构、Embedding 写入、校验和原子发布方案记录在 [RAG 索引入库设计 V1](../designs/rag-index-storage-v1.md)。真实 PostgreSQL 与 Embedding API 的端到端验收已完成，并保留显式开启、租户隔离和自动清理的重复执行入口。
 
 ### RAG 查询工作流
 
@@ -43,4 +43,4 @@ V1 的入库边界、表结构、Embedding 写入、校验和原子发布方案�
 
 ## 当前状态
 
-“真实索引下游”里程碑的配置、PostgreSQL/pgvector、`text-embedding-v4` 客户端、构建持久化、完整性校验、原子发布和工作流装配均已完成。真实外部依赖端到端验收、RAG 查询工作流和服务化入口尚未启动。
+“真实索引下游”里程碑的配置、PostgreSQL/pgvector、`text-embedding-v4` 客户端、构建持久化、完整性校验、原子发布、工作流装配和真实外部依赖端到端验收均已完成。RAG 查询工作流和服务化入口尚未启动，需另行确认和设计后再进入。

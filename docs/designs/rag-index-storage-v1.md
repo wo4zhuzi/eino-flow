@@ -1,5 +1,7 @@
 # RAG 索引入库设计 V1
 
+> 实现状态：已完成。真实 PostgreSQL、pgvector、`text-embedding-v4`、Structure-aware、Parent-child、重试复用、换版发布和失败隔离已通过显式开启的端到端验收。
+
 ## 1. 目标与边界
 
 V1 负责把 Chunking 结果转换为可发布、可检索的一组 Chunk 和向量，使用 PostgreSQL 与 pgvector 保存数据。同时建立租户、知识库、文档三级检索作用域，为后续 Metadata 过滤、文档权限和混合检索保留稳定边界。
@@ -407,7 +409,7 @@ V1 暂不定义 ACL 表，因为尚未确认实际主体模型和权限粒度。
 
 ### 8.1 真实索引下游 V1
 
-本阶段实现本文已经确定的数据模型：
+本阶段已实现并通过真实外部依赖端到端验收，包含本文确定的数据模型：
 
 - Embedding 输入构建、Token 统计和 Hash 去重。
 - `chunk_sets`、`chunks`、`chunk_embeddings` 的事务写入、重试、校验和原子发布。
