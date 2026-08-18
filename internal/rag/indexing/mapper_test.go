@@ -319,6 +319,10 @@ func (storeStub) SaveEmbeddings(context.Context, indexstore.SetID, []EmbeddingRe
 	return nil
 }
 
+func (storeStub) Validate(context.Context, indexstore.SetID) error {
+	return nil
+}
+
 func (storeStub) Publish(context.Context, indexstore.SetID) error {
 	return nil
 }

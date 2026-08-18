@@ -15,6 +15,52 @@ import (
 
 const oldTestSetID = indexstore.SetID("22222222-2222-4222-8222-222222222222")
 
+func TestStoreValidateUsesReadOnlySnapshot(t *testing.T) {
+	db, mock, cleanup := newMockDatabase(t)
+	defer cleanup()
+	store, err := NewStore(db, "vdb")
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	build := validStoreBuild()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(setQueryPattern()).WillReturnRows(storeSetRows(build, setStatusBuilding, false))
+	mock.ExpectQuery(profileConfigQueryPattern()).WillReturnRows(profileConfigRows(build.Set.Config))
+	mock.ExpectQuery(chunkQueryPattern()).WillReturnRows(publishChunkRows(build))
+	mock.ExpectQuery(embeddingQueryPattern()).WillReturnRows(publishEmbeddingRows(build))
+	mock.ExpectCommit()
+
+	if err := store.Validate(context.Background(), build.Set.ID); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("Validate() performed unexpected mutation: %v", err)
+	}
+}
+
+func TestStoreValidateRejectsNonBuildingSet(t *testing.T) {
+	db, mock, cleanup := newMockDatabase(t)
+	defer cleanup()
+	store, err := NewStore(db, "vdb")
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	build := validStoreBuild()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(setQueryPattern()).WillReturnRows(storeSetRows(build, setStatusActive, true))
+	mock.ExpectRollback()
+
+	err = store.Validate(context.Background(), build.Set.ID)
+	if !errors.Is(err, indexing.ErrBuildConflict) {
+		t.Fatalf("Validate() error = %v, want ErrBuildConflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("Validate() performed unexpected query: %v", err)
+	}
+}
+
 func TestStorePublishFirstAndReplacementAreAtomic(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -165,6 +211,9 @@ func TestStorePublishRollsBackDatabaseFailure(t *testing.T) {
 
 func TestStorePublishBoundaries(t *testing.T) {
 	var store *Store
+	if err := store.Validate(context.Background(), testSetID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil Store Validate() error = %v", err)
+	}
 	if err := store.Publish(context.Background(), testSetID); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("nil Store Publish() error = %v", err)
 	}
@@ -176,6 +225,12 @@ func TestStorePublishBoundaries(t *testing.T) {
 	}
 	if err := store.Publish(nil, testSetID); !errors.Is(err, ErrNilContext) {
 		t.Fatalf("Publish(nil) error = %v", err)
+	}
+	if err := store.Validate(nil, testSetID); !errors.Is(err, ErrNilContext) {
+		t.Fatalf("Validate(nil) error = %v", err)
+	}
+	if err := store.Validate(context.Background(), "not-a-uuid"); !errors.Is(err, indexing.ErrInvalidBuild) {
+		t.Fatalf("Validate(invalid ID) error = %v", err)
 	}
 	if err := store.Publish(context.Background(), "not-a-uuid"); !errors.Is(err, indexing.ErrInvalidBuild) {
 		t.Fatalf("Publish(invalid ID) error = %v", err)

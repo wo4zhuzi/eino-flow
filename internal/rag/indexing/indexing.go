@@ -10,8 +10,11 @@ import (
 	ingestion "github.com/wo4zhuzi/eino-document-ingestion"
 )
 
-func prepareForIndexing(result *ingestion.Result) (SourceInfo, *ingestion.Result, error) {
-	documentHash := sha256.Sum256([]byte("source:" + result.Source.URI))
+func prepareForIndexing(result *ingestion.Result, documentID string) (SourceInfo, *ingestion.Result, error) {
+	documentID = strings.TrimSpace(documentID)
+	if documentID == "" {
+		return SourceInfo{}, nil, ErrInvalidRequest
+	}
 	source := SourceInfo{
 		URI:         result.Source.URI,
 		ResolvedURI: result.Source.ResolvedURI,
@@ -20,7 +23,7 @@ func prepareForIndexing(result *ingestion.Result) (SourceInfo, *ingestion.Result
 		MIMEType:    result.Source.MIMEType,
 		SizeBytes:   result.Source.SizeBytes,
 		SHA256:      result.Source.SHA256,
-		DocumentID:  hex.EncodeToString(documentHash[:]),
+		DocumentID:  documentID,
 		VersionID:   result.Source.SHA256,
 	}
 

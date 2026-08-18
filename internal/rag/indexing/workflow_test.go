@@ -15,6 +15,8 @@ import (
 	"github.com/wo4zhuzi/eino-document-chunking/strategy/structureaware"
 	ingestion "github.com/wo4zhuzi/eino-document-ingestion"
 	"github.com/wo4zhuzi/eino-document-parser-structured/markdown"
+	"github.com/wo4zhuzi/eino-flow/internal/embedding"
+	"github.com/wo4zhuzi/eino-flow/internal/rag/indexstore"
 	workflowruntime "github.com/wo4zhuzi/eino-flow/internal/workflow"
 )
 
@@ -35,6 +37,291 @@ type stubChunker struct {
 	received *ingestion.Result
 }
 
+type stubEmbedder struct {
+	err      error
+	calls    int
+	received [][]string
+	order    *[]string
+}
+
+func (s *stubEmbedder) Embed(_ context.Context, texts []string) ([]embedding.Result, error) {
+	if s.order != nil {
+		*s.order = append(*s.order, "embed")
+	}
+	s.calls++
+	s.received = append(s.received, append([]string(nil), texts...))
+	if s.err != nil {
+		return nil, s.err
+	}
+	results := make([]embedding.Result, len(texts))
+	for index := range results {
+		results[index] = embedding.Result{Vector: make([]float64, 1536), TokenCount: index + 1}
+	}
+	return results, nil
+}
+
+type stubStore struct {
+	prepareErr    error
+	saveErr       error
+	validateErr   error
+	publishErr    error
+	prepared      []BuildData
+	saved         [][]EmbeddingRecord
+	validated     []indexstore.SetID
+	published     []indexstore.SetID
+	order         *[]string
+	prepareResult []EmbeddingInput
+}
+
+func (s *stubStore) PrepareBuild(_ context.Context, build BuildData) ([]EmbeddingInput, error) {
+	if s.order != nil {
+		*s.order = append(*s.order, "prepare")
+	}
+	s.prepared = append(s.prepared, build)
+	if s.prepareErr != nil {
+		return nil, s.prepareErr
+	}
+	if s.prepareResult != nil {
+		return append([]EmbeddingInput(nil), s.prepareResult...), nil
+	}
+	return append([]EmbeddingInput(nil), build.EmbeddingInputs...), nil
+}
+
+func (s *stubStore) SaveEmbeddings(_ context.Context, _ indexstore.SetID, records []EmbeddingRecord) error {
+	if s.order != nil {
+		*s.order = append(*s.order, "save")
+	}
+	s.saved = append(s.saved, append([]EmbeddingRecord(nil), records...))
+	return s.saveErr
+}
+
+func (s *stubStore) Validate(_ context.Context, setID indexstore.SetID) error {
+	if s.order != nil {
+		*s.order = append(*s.order, "validate")
+	}
+	s.validated = append(s.validated, setID)
+	return s.validateErr
+}
+
+func (s *stubStore) Publish(_ context.Context, setID indexstore.SetID) error {
+	if s.order != nil {
+		*s.order = append(*s.order, "publish")
+	}
+	s.published = append(s.published, setID)
+	return s.publishErr
+}
+
+type retryStore struct {
+	embedded     bool
+	saveCalls    int
+	publishCalls int
+	publishCause error
+}
+
+type blockingEmbedder struct {
+	started chan struct{}
+}
+
+func (s *blockingEmbedder) Embed(ctx context.Context, _ []string) ([]embedding.Result, error) {
+	close(s.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (s *retryStore) PrepareBuild(_ context.Context, build BuildData) ([]EmbeddingInput, error) {
+	if s.embedded {
+		return nil, nil
+	}
+	return append([]EmbeddingInput(nil), build.EmbeddingInputs...), nil
+}
+
+func (s *retryStore) SaveEmbeddings(_ context.Context, _ indexstore.SetID, _ []EmbeddingRecord) error {
+	s.embedded = true
+	s.saveCalls++
+	return nil
+}
+
+func (*retryStore) Validate(context.Context, indexstore.SetID) error {
+	return nil
+}
+
+func (s *retryStore) Publish(context.Context, indexstore.SetID) error {
+	s.publishCalls++
+	if s.publishCalls == 1 {
+		return s.publishCause
+	}
+	return nil
+}
+
+func TestWorkflowExecutesRealIndexLifecycle(t *testing.T) {
+	chunkResult := parentChildResult()
+	chunkResult.Profile = chunking.Profile{Name: defaultProfileName, Version: defaultProfileVersion}
+	ingestor := &stubIngestor{result: plainIngestionResult()}
+	chunker := &stubChunker{result: chunkResult}
+	order := make([]string, 0, 5)
+	embedder := &stubEmbedder{order: &order}
+	store := &stubStore{order: &order}
+	dependencies := validWorkflowDependencies(ingestor, chunker)
+	dependencies.Embedder = embedder
+	dependencies.Store = store
+	workflow, err := New(context.Background(), dependencies)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := validWorkflowRequest("real-lifecycle", "document.txt")
+	original := request
+
+	result, err := workflow.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !reflect.DeepEqual(request, original) {
+		t.Fatalf("Run() mutated request: got=%#v want=%#v", request, original)
+	}
+	if !reflect.DeepEqual(order, []string{"prepare", "embed", "save", "validate", "publish"}) {
+		t.Fatalf("dependency order = %#v", order)
+	}
+	if len(store.prepared) != 1 || len(store.saved) != 1 || len(store.validated) != 1 || len(store.published) != 1 {
+		t.Fatalf("store calls: prepared=%d saved=%d validated=%d published=%d", len(store.prepared), len(store.saved), len(store.validated), len(store.published))
+	}
+	build := store.prepared[0]
+	if build.Set.ID != request.Index.SetID || build.Set.Scope.TenantID != request.Index.TenantID ||
+		build.Set.Document.SourceURI != request.Index.CanonicalURI || build.Set.Document.ContentSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("prepared build = %#v", build.Set)
+	}
+	if len(store.saved[0]) != len(build.EmbeddingInputs) || embedder.calls != 1 {
+		t.Fatalf("embedding calls=%d saved records=%d inputs=%d", embedder.calls, len(store.saved[0]), len(build.EmbeddingInputs))
+	}
+	if !result.Index.Published || !result.Index.ValidationPassed ||
+		result.Index.GeneratedEmbeddingCount != len(build.EmbeddingInputs) || result.Index.ReusedEmbeddingCount != 0 {
+		t.Fatalf("index result = %#v", result.Index)
+	}
+	assertStageStatuses(t, result.Stages)
+}
+
+func TestWorkflowRetryReusesSavedEmbeddings(t *testing.T) {
+	chunkResult := parentChildResult()
+	chunkResult.Profile = chunking.Profile{Name: defaultProfileName, Version: defaultProfileVersion}
+	cause := errors.New("publish unavailable")
+	store := &retryStore{publishCause: cause}
+	embedder := &stubEmbedder{}
+	dependencies := validWorkflowDependencies(&stubIngestor{result: plainIngestionResult()}, &stubChunker{result: chunkResult})
+	dependencies.Embedder = embedder
+	dependencies.Store = store
+	workflow, err := New(context.Background(), dependencies)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := validWorkflowRequest("retry-run", "document.txt")
+
+	_, err = workflow.Run(context.Background(), request)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), nodePublishIndex) || !strings.Contains(err.Error(), `run_id="retry-run"`) {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	result, err := workflow.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if embedder.calls != 1 || store.saveCalls != 1 || store.publishCalls != 2 {
+		t.Fatalf("retry calls: embed=%d save=%d publish=%d", embedder.calls, store.saveCalls, store.publishCalls)
+	}
+	if result.Index.GeneratedEmbeddingCount != 0 || result.Index.ReusedEmbeddingCount != result.Index.EmbeddingCount {
+		t.Fatalf("retry index result = %#v", result.Index)
+	}
+}
+
+func TestWorkflowPreservesDownstreamNodeErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		node      string
+		configure func(error, *stubEmbedder, *stubStore)
+	}{
+		{name: "prepare", node: nodePrepareIndex, configure: func(err error, _ *stubEmbedder, store *stubStore) { store.prepareErr = err }},
+		{name: "embed", node: nodeEmbedChunks, configure: func(err error, embedder *stubEmbedder, _ *stubStore) { embedder.err = err }},
+		{name: "persist", node: nodePersistIndex, configure: func(err error, _ *stubEmbedder, store *stubStore) { store.saveErr = err }},
+		{name: "validate", node: nodeValidateIndex, configure: func(err error, _ *stubEmbedder, store *stubStore) { store.validateErr = err }},
+		{name: "publish", node: nodePublishIndex, configure: func(err error, _ *stubEmbedder, store *stubStore) { store.publishErr = err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			chunkResult := parentChildResult()
+			chunkResult.Profile = chunking.Profile{Name: defaultProfileName, Version: defaultProfileVersion}
+			embedder := &stubEmbedder{}
+			store := &stubStore{}
+			cause := errors.New(test.name + " failed")
+			test.configure(cause, embedder, store)
+			dependencies := validWorkflowDependencies(&stubIngestor{result: plainIngestionResult()}, &stubChunker{result: chunkResult})
+			dependencies.Embedder = embedder
+			dependencies.Store = store
+			workflow, err := New(context.Background(), dependencies)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			_, err = workflow.Run(context.Background(), validWorkflowRequest("error-run", "document.txt"))
+			if !errors.Is(err, cause) || !strings.Contains(err.Error(), test.node) || !strings.Contains(err.Error(), `run_id="error-run"`) {
+				t.Fatalf("Run() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkflowRejectsInvalidTargetAndStoreEmbeddingSelection(t *testing.T) {
+	chunkResult := parentChildResult()
+	chunkResult.Profile = chunking.Profile{Name: defaultProfileName, Version: defaultProfileVersion}
+	dependencies := validWorkflowDependencies(&stubIngestor{result: plainIngestionResult()}, &stubChunker{result: chunkResult})
+	workflow, err := New(context.Background(), dependencies)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := validWorkflowRequest("invalid-target", "document.txt")
+	request.Index.SourceName = ""
+	_, err = workflow.Run(context.Background(), request)
+	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), nodeIngestDocument) {
+		t.Fatalf("Run(invalid target) error = %v", err)
+	}
+
+	store := &stubStore{prepareResult: []EmbeddingInput{{
+		Candidate: indexstore.CandidateID{SetID: request.Index.SetID, ChunkID: "unknown"},
+		ModelKey:  "unknown",
+		Text:      "unknown",
+	}}}
+	dependencies.Store = store
+	workflow, err = New(context.Background(), dependencies)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, err = workflow.Run(context.Background(), validWorkflowRequest("invalid-selection", "document.txt"))
+	if !errors.Is(err, ErrInvalidEmbedding) || !strings.Contains(err.Error(), nodePrepareIndex) {
+		t.Fatalf("Run(invalid selection) error = %v", err)
+	}
+}
+
+func TestWorkflowCancelsInFlightEmbedding(t *testing.T) {
+	chunkResult := parentChildResult()
+	chunkResult.Profile = chunking.Profile{Name: defaultProfileName, Version: defaultProfileVersion}
+	embedder := &blockingEmbedder{started: make(chan struct{})}
+	dependencies := validWorkflowDependencies(&stubIngestor{result: plainIngestionResult()}, &stubChunker{result: chunkResult})
+	dependencies.Embedder = embedder
+	workflow, err := New(context.Background(), dependencies)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := workflow.Run(ctx, validWorkflowRequest("cancel-run", "document.txt"))
+		done <- runErr
+	}()
+	<-embedder.started
+	cancel()
+	err = <-done
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), nodeEmbedChunks) ||
+		!strings.Contains(err.Error(), `run_id="cancel-run"`) {
+		t.Fatalf("Run(canceled embedding) error = %v", err)
+	}
+}
+
 func (s *stubChunker) Chunk(_ context.Context, result *ingestion.Result) (*chunking.Result, error) {
 	s.received = result
 	return s.result, s.err
@@ -45,14 +332,11 @@ func TestWorkflowUsesStructuredMarkdownAndStructureAwareChunking(t *testing.T) {
 	writeFile(t, path, "# 安装\n\n下载发布包并初始化配置。\n\n## 验证\n\n检查健康状态与日志。\n")
 	workflow := newRealWorkflow(t)
 
-	result, err := workflow.Run(context.Background(), Request{
-		RunID:     "markdown-run",
-		SourceURI: path,
-	})
+	result, err := workflow.Run(context.Background(), validWorkflowRequest("markdown-run", path))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if result.Workflow != "rag_document_indexing@v4" || result.Status != "chunked_with_simulated_downstream" {
+	if result.Workflow != "rag_document_indexing@v5" || result.Status != "published" {
 		t.Fatalf("result identity = %#v", result)
 	}
 	if result.Parser != markdown.ParserInfo() {
@@ -82,8 +366,8 @@ func TestWorkflowUsesStructuredMarkdownAndStructureAwareChunking(t *testing.T) {
 		}
 	}
 	assertStageStatuses(t, result.Stages)
-	if !result.Placeholder.Simulated || result.Placeholder.PersistedRecordCount != 0 {
-		t.Fatalf("Placeholder = %#v", result.Placeholder)
+	if !result.Index.Published || !result.Index.ValidationPassed || result.Index.ChunkCount != 2 || result.Index.EmbeddingCount != 2 {
+		t.Fatalf("Index = %#v", result.Index)
 	}
 }
 
@@ -92,10 +376,7 @@ func TestWorkflowPrependsReadableContextWithoutLeakingStructureIDs(t *testing.T)
 	writeFile(t, path, "# 安装\n\n```sh\nrun-install\n```\n")
 	workflow := newRealWorkflow(t)
 
-	result, err := workflow.Run(context.Background(), Request{
-		RunID:     "semantic-context-run",
-		SourceURI: path,
-	})
+	result, err := workflow.Run(context.Background(), validWorkflowRequest("semantic-context-run", path))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -117,10 +398,7 @@ func TestWorkflowUsesParentChildForPlainText(t *testing.T) {
 	writeFile(t, path, "普通文本使用 Parent-child Chunk。")
 	workflow := newRealWorkflow(t)
 
-	result, err := workflow.Run(context.Background(), Request{
-		RunID:     "text-run",
-		SourceURI: path,
-	})
+	result, err := workflow.Run(context.Background(), validWorkflowRequest("text-run", path))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -169,15 +447,24 @@ func TestWorkflowPreservesStructuredIDsAndDoesNotMutateIngestorResult(t *testing
 		Documents: documents,
 	}}
 	chunker := &stubChunker{result: &chunking.Result{
+		Profile:      chunking.Profile{Name: defaultProfileName, Version: defaultProfileVersion},
 		StrategyName: structureaware.StructureAwareStrategyName,
-		Chunks:       []chunking.Chunk{{ID: "chunk", Content: "正文"}},
+		Chunks: []chunking.Chunk{{
+			ID:             "chunk",
+			Kind:           structureaware.ChunkKindStructure,
+			Content:        "正文",
+			DocumentID:     "document-1",
+			SourceUnitIDs:  []string{"root"},
+			Sequence:       1,
+			CharacterCount: 2,
+			Metadata:       map[string]any{},
+		}},
 	}}
 	workflow := newWorkflow(t, ingestor, chunker)
 
-	result, err := workflow.Run(context.Background(), Request{
-		RunID:     "  stable-ids  ",
-		SourceURI: "  /documents/guide.md  ",
-	})
+	request := validWorkflowRequest("  stable-ids  ", "  /documents/guide.md  ")
+	request.Index.TenantID = "  tenant-1  "
+	result, err := workflow.Run(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -205,7 +492,7 @@ func TestWorkflowPreservesDependencyAndContextErrors(t *testing.T) {
 	ingestor := &stubIngestor{err: ingestion.ErrUnsupportedFormat}
 	chunker := &stubChunker{}
 	workflow := newWorkflow(t, ingestor, chunker)
-	_, err := workflow.Run(context.Background(), Request{RunID: "run", SourceURI: "document.csv"})
+	_, err := workflow.Run(context.Background(), validWorkflowRequest("run", "document.csv"))
 	if !errors.Is(err, ingestion.ErrUnsupportedFormat) {
 		t.Fatalf("Run(ingestion error) = %v", err)
 	}
@@ -220,14 +507,14 @@ func TestWorkflowPreservesDependencyAndContextErrors(t *testing.T) {
 	ingestor.err = nil
 	ingestor.result = plainIngestionResult()
 	chunker.err = chunking.ErrOversizeBlock
-	_, err = workflow.Run(context.Background(), Request{RunID: "run", SourceURI: "document.md"})
+	_, err = workflow.Run(context.Background(), validWorkflowRequest("run", "document.md"))
 	if !errors.Is(err, chunking.ErrOversizeBlock) {
 		t.Fatalf("Run(chunk error) = %v", err)
 	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = workflow.Run(canceled, Request{RunID: "run", SourceURI: "document.txt"})
+	_, err = workflow.Run(canceled, validWorkflowRequest("run", "document.txt"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run(canceled) = %v", err)
 	}
@@ -238,7 +525,7 @@ func TestStructuredMarkdownRejectsOversizeAtomicBlock(t *testing.T) {
 	writeFile(t, path, "```text\n"+strings.Repeat("x", defaultStructureMaxRunes+1)+"\n```\n")
 	workflow := newRealWorkflow(t)
 
-	_, err := workflow.Run(context.Background(), Request{RunID: "oversize", SourceURI: path})
+	_, err := workflow.Run(context.Background(), validWorkflowRequest("oversize", path))
 	if !errors.Is(err, chunking.ErrOversizeBlock) {
 		t.Fatalf("Run() error = %v, want %v", err, chunking.ErrOversizeBlock)
 	}
@@ -248,26 +535,47 @@ func TestWorkflowAndChunkerValidateBoundaries(t *testing.T) {
 	ingestor := &stubIngestor{result: plainIngestionResult()}
 	chunker := &stubChunker{result: &chunking.Result{}}
 	workflow := newWorkflow(t, ingestor, chunker)
-	if _, err := workflow.Run(context.Background(), Request{SourceURI: "document.txt"}); !errors.Is(err, ErrInvalidRunID) {
+	request := validWorkflowRequest("", "document.txt")
+	if _, err := workflow.Run(context.Background(), request); !errors.Is(err, ErrInvalidRunID) {
 		t.Fatalf("Run(empty run ID) = %v", err)
 	}
 	ingestor.result = nil
-	if _, err := workflow.Run(context.Background(), Request{RunID: "run", SourceURI: "document.txt"}); !errors.Is(err, ingestion.ErrNoParsedContent) {
+	if _, err := workflow.Run(context.Background(), validWorkflowRequest("run", "document.txt")); !errors.Is(err, ingestion.ErrNoParsedContent) {
 		t.Fatalf("Run(nil ingestion result) = %v", err)
 	}
 	ingestor.result = plainIngestionResult()
 	chunker.result = nil
-	if _, err := workflow.Run(context.Background(), Request{RunID: "run", SourceURI: "document.txt"}); !errors.Is(err, chunking.ErrNoValidChunks) {
+	if _, err := workflow.Run(context.Background(), validWorkflowRequest("run", "document.txt")); !errors.Is(err, chunking.ErrNoValidChunks) {
 		t.Fatalf("Run(nil chunk result) = %v", err)
 	}
-	if _, err := New(nil, Dependencies{Ingestor: ingestor, Chunker: chunker}); !errors.Is(err, ErrNilContext) {
+	dependencies := validWorkflowDependencies(ingestor, chunker)
+	if _, err := New(nil, dependencies); !errors.Is(err, ErrNilContext) {
 		t.Fatalf("New(nil) = %v", err)
 	}
-	if _, err := New(context.Background(), Dependencies{Chunker: chunker}); !errors.Is(err, ErrInvalidDependencies) {
+	missingIngestor := dependencies
+	missingIngestor.Ingestor = nil
+	if _, err := New(context.Background(), missingIngestor); !errors.Is(err, ErrInvalidDependencies) {
 		t.Fatalf("New(nil ingestor) = %v", err)
 	}
-	if _, err := New(context.Background(), Dependencies{Ingestor: ingestor}); !errors.Is(err, ErrInvalidDependencies) {
+	missingChunker := dependencies
+	missingChunker.Chunker = nil
+	if _, err := New(context.Background(), missingChunker); !errors.Is(err, ErrInvalidDependencies) {
 		t.Fatalf("New(nil chunker) = %v", err)
+	}
+	missingEmbedder := dependencies
+	missingEmbedder.Embedder = nil
+	if _, err := New(context.Background(), missingEmbedder); !errors.Is(err, ErrInvalidDependencies) {
+		t.Fatalf("New(nil embedder) = %v", err)
+	}
+	missingStore := dependencies
+	missingStore.Store = nil
+	if _, err := New(context.Background(), missingStore); !errors.Is(err, ErrInvalidDependencies) {
+		t.Fatalf("New(nil store) = %v", err)
+	}
+	invalidBuildConfig := dependencies
+	invalidBuildConfig.BuildConfig = BuildConfig{}
+	if _, err := New(context.Background(), invalidBuildConfig); !errors.Is(err, ErrInvalidDependencies) {
+		t.Fatalf("New(invalid build config) = %v", err)
 	}
 	var unavailable *Workflow
 	if _, err := unavailable.Run(context.Background(), Request{}); !errors.Is(err, ErrWorkflowUnavailable) {
@@ -317,11 +625,45 @@ func newRealWorkflow(t *testing.T) *Workflow {
 
 func newWorkflow(t *testing.T, ingestor Ingestor, chunker Chunker) *Workflow {
 	t.Helper()
-	workflow, err := New(context.Background(), Dependencies{Ingestor: ingestor, Chunker: chunker})
+	workflow, err := New(context.Background(), validWorkflowDependencies(ingestor, chunker))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	return workflow
+}
+
+func validWorkflowDependencies(ingestor Ingestor, chunker Chunker) Dependencies {
+	return Dependencies{
+		Ingestor: ingestor,
+		Chunker:  chunker,
+		Embedder: &stubEmbedder{},
+		Store:    &stubStore{},
+		BuildConfig: BuildConfig{
+			Chunk: DefaultChunkConfig(),
+			Model: ModelProfile{
+				Model:         "text-embedding-v4",
+				Dimensions:    1536,
+				Distance:      DistanceCosine,
+				ConfigVersion: "v1",
+			},
+		},
+	}
+}
+
+func validWorkflowRequest(runID, sourceURI string) Request {
+	return Request{
+		RunID:     runID,
+		SourceURI: sourceURI,
+		Index: IndexTarget{
+			SetID:           "11111111-1111-4111-8111-111111111111",
+			TenantID:        "tenant-1",
+			KnowledgeBaseID: "kb-1",
+			DocumentID:      "document-1",
+			CanonicalURI:    "knowledge://documents/document-1",
+			SourceName:      "document.md",
+			Title:           "文档",
+		},
+	}
 }
 
 func plainIngestionResult() *ingestion.Result {
@@ -349,6 +691,7 @@ func assertStageStatuses(t *testing.T, stages []StageResult) {
 	wantNames := []string{
 		nodeIngestDocument,
 		nodeChunkDocument,
+		nodePrepareIndex,
 		nodeEmbedChunks,
 		nodePersistIndex,
 		nodeValidateIndex,
@@ -359,12 +702,8 @@ func assertStageStatuses(t *testing.T, stages []StageResult) {
 		t.Fatalf("stages = %#v", stages)
 	}
 	for index, name := range wantNames {
-		status := StageStatusSimulated
-		if name == nodeIngestDocument || name == nodeChunkDocument || name == nodeBuildResult {
-			status = StageStatusCompleted
-		}
-		if stages[index].Name != name || stages[index].Status != status {
-			t.Fatalf("stage[%d] = %#v, want name=%s status=%s", index, stages[index], name, status)
+		if stages[index].Name != name || stages[index].Status != StageStatusCompleted {
+			t.Fatalf("stage[%d] = %#v, want name=%s status=%s", index, stages[index], name, StageStatusCompleted)
 		}
 	}
 }

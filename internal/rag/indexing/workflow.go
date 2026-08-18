@@ -6,12 +6,14 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/wo4zhuzi/eino-flow/internal/rag/indexstore"
 	workflowruntime "github.com/wo4zhuzi/eino-flow/internal/workflow"
 )
 
 const (
 	nodeIngestDocument = "ingest_document"
 	nodeChunkDocument  = "chunk_document"
+	nodePrepareIndex   = "prepare_index"
 	nodeEmbedChunks    = "embed_chunks"
 	nodePersistIndex   = "persist_index"
 	nodeValidateIndex  = "validate_index"
@@ -21,7 +23,7 @@ const (
 
 var descriptor = workflowruntime.Descriptor{
 	Name:    "rag_document_indexing",
-	Version: "v4",
+	Version: "v5",
 }
 
 // Workflow 保存编译一次、重复执行的 Eino 索引工作流。
@@ -45,10 +47,23 @@ func New(ctx context.Context, dependencies Dependencies) (*Workflow, error) {
 	if err := workflowruntime.RequireDependency("Chunker", dependencies.Chunker); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
 	}
+	if err := workflowruntime.RequireDependency("Embedder", dependencies.Embedder); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
+	}
+	if err := workflowruntime.RequireDependency("Store", dependencies.Store); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
+	}
+	buildConfig, err := normalizeWorkflowBuildConfig(dependencies.BuildConfig)
+	if err != nil {
+		return nil, fmt.Errorf("%w: BuildConfig: %w", ErrInvalidDependencies, err)
+	}
 
 	nodes := &workflowNodes{
-		ingestor: dependencies.Ingestor,
-		chunker:  dependencies.Chunker,
+		ingestor:    dependencies.Ingestor,
+		chunker:     dependencies.Chunker,
+		embedder:    dependencies.Embedder,
+		store:       dependencies.Store,
+		buildConfig: buildConfig,
 	}
 	chain := compose.NewChain[Request, Result]()
 	chain.
@@ -63,22 +78,27 @@ func New(ctx context.Context, dependencies Dependencies) (*Workflow, error) {
 			compose.WithNodeName(nodeChunkDocument),
 		).
 		AppendLambda(
-			compose.InvokableLambda(nodes.simulateEmbedding),
+			compose.InvokableLambda(nodes.prepareIndex),
+			compose.WithNodeKey(nodePrepareIndex),
+			compose.WithNodeName(nodePrepareIndex),
+		).
+		AppendLambda(
+			compose.InvokableLambda(nodes.embedChunks),
 			compose.WithNodeKey(nodeEmbedChunks),
 			compose.WithNodeName(nodeEmbedChunks),
 		).
 		AppendLambda(
-			compose.InvokableLambda(nodes.simulatePersist),
+			compose.InvokableLambda(nodes.persistIndex),
 			compose.WithNodeKey(nodePersistIndex),
 			compose.WithNodeName(nodePersistIndex),
 		).
 		AppendLambda(
-			compose.InvokableLambda(nodes.simulateValidate),
+			compose.InvokableLambda(nodes.validateIndex),
 			compose.WithNodeKey(nodeValidateIndex),
 			compose.WithNodeName(nodeValidateIndex),
 		).
 		AppendLambda(
-			compose.InvokableLambda(nodes.simulatePublish),
+			compose.InvokableLambda(nodes.publishIndex),
 			compose.WithNodeKey(nodePublishIndex),
 			compose.WithNodeName(nodePublishIndex),
 		).
@@ -106,8 +126,7 @@ func (w *Workflow) Run(
 	if w == nil || w.runner == nil {
 		return Result{}, ErrWorkflowUnavailable
 	}
-	request.RunID = strings.TrimSpace(request.RunID)
-	request.SourceURI = strings.TrimSpace(request.SourceURI)
+	request = normalizeRequest(request)
 	if request.RunID == "" {
 		return Result{}, ErrInvalidRunID
 	}
@@ -118,4 +137,35 @@ func (w *Workflow) Run(
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func normalizeRequest(request Request) Request {
+	request.RunID = strings.TrimSpace(request.RunID)
+	request.SourceURI = strings.TrimSpace(request.SourceURI)
+	request.Index.SetID = indexstore.SetID(strings.TrimSpace(string(request.Index.SetID)))
+	request.Index.TenantID = strings.TrimSpace(request.Index.TenantID)
+	request.Index.KnowledgeBaseID = strings.TrimSpace(request.Index.KnowledgeBaseID)
+	request.Index.DocumentID = strings.TrimSpace(request.Index.DocumentID)
+	request.Index.CanonicalURI = strings.TrimSpace(request.Index.CanonicalURI)
+	request.Index.SourceName = strings.TrimSpace(request.Index.SourceName)
+	request.Index.Title = strings.TrimSpace(request.Index.Title)
+	return request
+}
+
+func normalizeWorkflowBuildConfig(config BuildConfig) (BuildConfig, error) {
+	config.Chunk.ProfileName = strings.TrimSpace(config.Chunk.ProfileName)
+	config.Chunk.ProfileVersion = strings.TrimSpace(config.Chunk.ProfileVersion)
+	config.Model.Model = strings.TrimSpace(config.Model.Model)
+	config.Model.Distance = strings.TrimSpace(config.Model.Distance)
+	config.Model.ConfigVersion = strings.TrimSpace(config.Model.ConfigVersion)
+	if config.Chunk.ProfileName == "" || config.Chunk.ProfileVersion == "" ||
+		config.Chunk.ParentMaxRunes < 1 || config.Chunk.ChildMaxRunes < 1 ||
+		config.Chunk.StructureMaxRunes < 1 || config.Chunk.StructureMinRunes < 1 ||
+		config.Chunk.StructureMinRunes > config.Chunk.StructureMaxRunes {
+		return BuildConfig{}, ErrInvalidChunkConfig
+	}
+	if _, err := makeModelKey(config.Model); err != nil {
+		return BuildConfig{}, err
+	}
+	return config, nil
 }

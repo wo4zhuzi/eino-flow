@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,38 @@ import (
 )
 
 const publishLockNamespace = "eino-flow:index-publish:v1"
+
+// Validate 在只读快照中校验 building Set 的 Profile、Chunk、关系和 Embedding 完整性。
+func (s *Store) Validate(ctx context.Context, setID indexstore.SetID) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || s.db == nil {
+		return ErrUnavailable
+	}
+	if !uuidPattern.MatchString(string(setID)) {
+		return invalidBuild("chunk_set_id 必须是 UUID")
+	}
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		target, err := s.findPublishSet(tx, setID, false)
+		if err != nil {
+			return err
+		}
+		if target.Status != setStatusBuilding || target.ActivatedAt != nil {
+			return buildConflict("目标 Set 不是可校验的 building 状态")
+		}
+		if err := s.validateProfileConfig(tx, target); err != nil {
+			return err
+		}
+		_, err = s.validatePublishSnapshot(tx, target)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	return classifyStoreError(err)
+}
 
 // Publish 校验持久化构建快照，并在同一事务中原子切换作用域内的 active Set。
 func (s *Store) Publish(ctx context.Context, setID indexstore.SetID) error {

@@ -7,6 +7,7 @@ require (
 	github.com/cloudwego/eino v0.9.12
 	github.com/cloudwego/eino-ext/components/embedding/openai v0.0.0-20260813030315-32635d4ae67d
 	github.com/cloudwego/eino-ext/devops v0.1.9
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/pgvector/pgvector-go v0.4.1
 	github.com/wo4zhuzi/eino-document-chunking v0.0.0-20260809141624-c95264b0c1fe
@@ -31,7 +32,6 @@ require (
 	github.com/eino-contrib/docx2md v0.0.1 // indirect
 	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

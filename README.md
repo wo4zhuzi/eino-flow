@@ -2,7 +2,7 @@
 
 基于 Eino 的通用 AI Workflow 编排层。仓库当前完成了第一个可运行闭环：文档索引工作流。
 
-当前实现迁移自 `eino-lab` 的 demo19，源快照为 `31aba6b`。迁移过程中保留了已经验证的文档摄取、结构化解析、自动切分和模拟下游，同时抽取了仓库内部可复用的工作流运行层。
+当前实现迁移自 `eino-lab` 的 demo19，源快照为 `31aba6b`。仓库已将文档摄取、结构化解析、自动切分、Embedding、持久化、校验和原子发布接成完整索引链路，同时抽取了仓库内部可复用的工作流运行层。
 
 ## 当前能力
 
@@ -11,15 +11,15 @@
 | 文档摄取 | 真实 | 加载本地文件或受安全策略约束的 HTTP/HTTPS URL |
 | 文档解析 | 真实 | Markdown 使用独立结构化 Parser，其他格式使用 ingestion 默认 Parser |
 | 文档切分 | 真实 | 根据 Parser 输出能力选择 Structure-aware 或 Parent-child 策略 |
-| Embedding | 模拟 | 不调用模型 |
-| 索引持久化 | 模拟 | 不连接数据库 |
-| 索引校验 | 模拟 | 不伪造校验成功 |
-| 索引发布 | 模拟 | 不切换线上索引版本 |
+| Embedding | 真实 | 调用 `text-embedding-v4`，保存 1536 维向量和精确 Token 用量 |
+| 索引持久化 | 真实 | 写入 PostgreSQL building Set、Chunk 和不可检索向量 |
+| 索引校验 | 真实 | 校验 Profile、Chunk 关系和 Embedding 完整性 |
+| 索引发布 | 真实 | 按完整作用域串行化并原子切换 active Set |
 | 结果构建 | 真实 | 返回 Parser、Chunk、关系、统计和各阶段状态 |
 
-稳定工作流标识为 `rag_document_indexing@v4`，成功状态为 `chunked_with_simulated_downstream`。
+稳定工作流标识为 `rag_document_indexing@v5`，成功状态为 `published`。
 
-PostgreSQL/GORM 连接基础设施、RAG 索引表 schema 校验、building Set 持久化，以及基于 Eino 官方 OpenAI 组件的 `text-embedding-v4` 客户端已经就绪，但尚未接入上述工作流；当前运行入口仍不会连接模型服务、数据库或执行索引写入。
+启动入口负责一次性加载配置、连接 PostgreSQL、校验既有 schema、构造 Index Store 和 Embedding 客户端，并在退出时关闭连接。索引工作流只依赖调用方接口和强类型构建配置，不读取环境变量。
 
 Embedding 客户端固定请求 1536 维向量，并校验返回维度。阿里云兼容接口只返回请求级 Token 用量，因此当前按单条文本发起请求，以便为后续 `chunk_embeddings.embedding_token_count` 保存准确的服务端计量结果；`EMBEDDING_BATCH_SIZE` 在这一阶段控制最大并发数，合法范围为 1 到 10。
 
@@ -38,13 +38,14 @@ flowchart TB
     subgraph RAG[RAG 索引工作流]
         Ingest[ingest_document<br/>真实]
         Chunk[chunk_document<br/>真实]
-        Embed[embed_chunks<br/>模拟]
-        Persist[persist_index<br/>模拟]
-        Validate[validate_index<br/>模拟]
-        Publish[publish_index<br/>模拟]
+        Prepare[prepare_index<br/>真实]
+        Embed[embed_chunks<br/>真实]
+        Persist[persist_index<br/>真实]
+        Validate[validate_index<br/>真实]
+        Publish[publish_index<br/>真实]
         Result[build_result<br/>真实]
 
-        Ingest --> Chunk --> Embed --> Persist --> Validate --> Publish --> Result
+        Ingest --> Chunk --> Prepare --> Embed --> Persist --> Validate --> Publish --> Result
     end
 
     subgraph Packages[独立文档处理模块]
@@ -59,14 +60,12 @@ flowchart TB
     Chunk --> Chunking
 
     classDef real fill:#e8f5e9,stroke:#2e7d32,color:#1b1b1b;
-    classDef simulated fill:#fff8e1,stroke:#f57f17,stroke-dasharray: 5 5,color:#1b1b1b;
-    class Ingest,Chunk,Result real;
-    class Embed,Persist,Validate,Publish simulated;
+    class Ingest,Chunk,Prepare,Embed,Persist,Validate,Publish,Result real;
 ```
 
 ## 索引存储核心逻辑
 
-以下是已经实现、但尚待真实工作流接入的索引构建与存储链路：
+当前工作流执行以下索引构建与存储链路：
 
 ```mermaid
 flowchart TB
@@ -93,7 +92,7 @@ flowchart TB
         Compare -->|不存在或变化| Missing
     end
 
-    Embed[Embedding Client<br/>事务外生成向量和 Token 数<br/>待模块 07 接入]
+    Embed[Embedding Client<br/>事务外生成向量和 Token 数]
 
     subgraph PostgreSQL[PostgreSQL]
         Sets[(chunk_sets<br/>构建版本与状态)]
@@ -112,7 +111,7 @@ flowchart TB
 
 向量记录使用 `(chunk_set_id, chunk_id, model_key)` 标识一个 Chunk 在特定模型空间中的当前向量；`input_sha256` 是最终 Embedding 文本的 Hash，用于判断已有向量能否复用。模型或模型配置变化会生成新的 `model_key`，文本变化会生成新的 `input_sha256`，任一变化都需要重新生成向量。
 
-`PrepareBuild` 和 `SaveEmbeddings` 分别使用短事务，Embedding 网络请求位于两个事务之间，避免模型调用长时间占用数据库锁。当前默认工作流仍使用模拟节点，模块 07 接入完成后才会实际执行这条链路。
+`PrepareBuild` 和 `SaveEmbeddings` 分别使用短事务，Embedding 网络请求位于两个事务之间，避免模型调用长时间占用数据库锁。`Validate` 使用只读快照执行显式校验，`Publish` 在发布事务内再次校验并原子切换版本，避免校验与发布之间的竞态。
 
 ### 文档身份与索引版本生命周期
 
@@ -144,7 +143,7 @@ flowchart TB
     RetiredA -. 不参与召回 .-> After
 ```
 
-发布以完整 Set 为单位，不会只切换部分 Chunk。Retriever 必须在数据库查询阶段同时约束可信作用域、`chunk_sets.status='active'`、`chunk_embeddings.searchable=true` 和目标 `model_key`，避免 building 或 retired 版本进入向量候选集。模块 05 已实现 building Set 写入，模块 06 已实现事务内完整性校验、作用域 advisory lock 和无空窗原子发布；真实工作流接入属于模块 07，尚未完成。
+发布以完整 Set 为单位，不会只切换部分 Chunk。Retriever 必须在数据库查询阶段同时约束可信作用域、`chunk_sets.status='active'`、`chunk_embeddings.searchable=true` 和目标 `model_key`，避免 building 或 retired 版本进入向量候选集。工作流使用同一个 Set ID 支持幂等重试：Hash 未变化的已有向量会被复用，不会重复调用模型。
 
 `internal/workflow` 只管理工作流运行，不依赖 RAG 业务类型：
 
@@ -181,7 +180,20 @@ flowchart TB
 
 ## 运行
 
-仓库使用 Go `1.26.x`、Eino `v0.9.12`。默认示例不需要模型、数据库或 API Key。
+仓库使用 Go `1.26.x`、Eino `v0.9.12`。运行入口会执行真实模型调用和数据库发布，启动前必须按 [RAG 索引入库设计 V1](docs/designs/rag-index-storage-v1.md) 创建 schema，并配置以下必填环境变量：
+
+```bash
+export POSTGRES_HOST='127.0.0.1'
+export POSTGRES_USER='application'
+export POSTGRES_PASSWORD='<数据库密码>'
+export POSTGRES_DB='knowledge'
+export POSTGRES_SSLMODE='disable'
+export EMBEDDING_BASE_URL='https://dashscope.aliyuncs.com/compatible-mode/v1'
+export EMBEDDING_KEY='<Embedding API Key>'
+export EMBEDDING_MODEL='text-embedding-v4'
+```
+
+端口、schema、连接池、Embedding 维度、超时和并发数有安全默认值，完整变量名见 `internal/config/load.go`。
 
 运行默认 Markdown：
 
@@ -189,11 +201,12 @@ flowchart TB
 go run ./cmd/rag-index-dev
 ```
 
-解析指定文件或 URL：
+索引指定文件或 URL；第二个可选参数是用于重试的既有 Set UUID：
 
 ```bash
 go run ./cmd/rag-index-dev /absolute/path/to/document.txt
 go run ./cmd/rag-index-dev https://example.com/document.md
+go run ./cmd/rag-index-dev /absolute/path/to/document.txt 11111111-1111-4111-8111-111111111111
 ```
 
 输出包含完整 Chunk 正文，适合本地开发和测试，不应直接作为生产日志格式。
@@ -204,7 +217,7 @@ go run ./cmd/rag-index-dev https://example.com/document.md
 EINO_DEV=true go run ./cmd/rag-index-dev
 ```
 
-在 Eino Dev 中连接 `127.0.0.1:52538`，选择 `rag_document_indexing@v4`。该模式只用于本地调试，不应暴露到公网。
+在 Eino Dev 中连接 `127.0.0.1:52538`，选择 `rag_document_indexing@v5`。该模式只用于本地调试，不应暴露到公网。
 
 ## 验证
 
@@ -214,8 +227,8 @@ go test -race ./... -count=1
 go vet ./...
 ```
 
-测试覆盖 Markdown Structure-aware、TXT Parent-child、稳定 ID、语义路径、输入不可变性、错误链、超大原子块和公共 Runner 并发复用。
+默认测试使用内存替身，不访问真实数据库或模型服务。测试覆盖 Markdown Structure-aware、TXT Parent-child、真实节点调用顺序、稳定 ID、同 Set 重试复用、输入不可变性、错误链、超大原子块和公共 Runner 并发复用。
 
 ## 后续演进
 
-真实索引下游的入库边界、表结构、写入校验和发布流程见 [RAG 索引入库设计 V1](docs/designs/rag-index-storage-v1.md)。其余后续方向维护在 [演进计划](docs/plans/2026-08-11-demo19-rag-migration.md)中。每个里程碑开始前先单独完成设计讨论和决策确认，再进入实现；当前不会提前实现真实索引下游或查询工作流。
+真实索引下游的入库边界、表结构、写入校验和发布流程见 [RAG 索引入库设计 V1](docs/designs/rag-index-storage-v1.md)。其余后续方向维护在 [演进计划](docs/plans/2026-08-11-demo19-rag-migration.md)中。当前范围不包含 RAG 查询工作流、混合检索、Rerank 或 Agent。
