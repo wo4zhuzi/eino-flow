@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -160,9 +159,9 @@ func normalizeBuildSpec(spec BuildSpec) (BuildSpec, indexstore.ModelKey, error) 
 	if !isLowerSHA256(spec.Document.ContentSHA256) {
 		return BuildSpec{}, "", invalidBuild("content_sha256 必须是 64 位小写十六进制")
 	}
-	modelKey, err := makeModelKey(spec.Model)
+	modelKey, err := indexstore.NewModelKey(spec.Model)
 	if err != nil {
-		return BuildSpec{}, "", err
+		return BuildSpec{}, "", fmt.Errorf("%w: %w", ErrInvalidBuild, err)
 	}
 	return spec, modelKey, nil
 }
@@ -205,19 +204,6 @@ func (spec BuildSpec) configFor(strategy string) (json.RawMessage, error) {
 		return nil, invalidBuild("编码配置快照: %v", err)
 	}
 	return encoded, nil
-}
-
-func makeModelKey(profile ModelProfile) (indexstore.ModelKey, error) {
-	if profile.Model == "" || profile.Dimensions < 1 || profile.Distance == "" || profile.ConfigVersion == "" {
-		return "", invalidBuild("模型、维度、距离算法和配置版本不能为空")
-	}
-	if profile.Distance != DistanceCosine {
-		return "", invalidBuild("不支持距离算法 %q", profile.Distance)
-	}
-	canonical := profile.Model + "\x00" + strconv.Itoa(profile.Dimensions) + "\x00" +
-		profile.Distance + "\x00" + profile.ConfigVersion
-	digest := sha256Hex(canonical)
-	return indexstore.ModelKey(profile.Model + ":" + digest), nil
 }
 
 func validateChunkBase(

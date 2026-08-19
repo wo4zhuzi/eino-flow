@@ -10,7 +10,7 @@ import (
 
 const (
 	// DistanceCosine 表示模型空间使用余弦距离。
-	DistanceCosine = "cosine"
+	DistanceCosine = indexstore.DistanceCosine
 	// EmbeddingInputPolicyV1 是当前 Embedding 文本拼装规则的稳定版本。
 	EmbeddingInputPolicyV1 = "v1"
 )
@@ -40,12 +40,7 @@ type Profile struct {
 }
 
 // ModelProfile 描述影响向量兼容性的全部稳定模型属性。
-type ModelProfile struct {
-	Model         string
-	Dimensions    int
-	Distance      string
-	ConfigVersion string
-}
+type ModelProfile = indexstore.ModelProfile
 
 // ParentChildConfig 是 Parent-child 策略的完整入库配置快照。
 type ParentChildConfig struct {

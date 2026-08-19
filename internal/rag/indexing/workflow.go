@@ -164,7 +164,7 @@ func normalizeWorkflowBuildConfig(config BuildConfig) (BuildConfig, error) {
 		config.Chunk.StructureMinRunes > config.Chunk.StructureMaxRunes {
 		return BuildConfig{}, ErrInvalidChunkConfig
 	}
-	if _, err := makeModelKey(config.Model); err != nil {
+	if _, err := indexstore.NewModelKey(config.Model); err != nil {
 		return BuildConfig{}, err
 	}
 	return config, nil

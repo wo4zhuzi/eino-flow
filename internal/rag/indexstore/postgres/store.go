@@ -387,18 +387,22 @@ func buildConflict(detail string) error {
 
 func classifyStoreError(err error) error {
 	if err == nil || errors.Is(err, indexing.ErrInvalidBuild) || errors.Is(err, indexing.ErrBuildConflict) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		isContextError(err) {
 		return err
 	}
-	return &storeOperationError{cause: err}
+	return &storeOperationError{operation: indexing.ErrStoreUnavailable, cause: err}
 }
 
 type storeOperationError struct {
-	cause error
+	operation error
+	cause     error
 }
 
-func (*storeOperationError) Error() string {
-	return indexing.ErrStoreUnavailable.Error()
+func (e *storeOperationError) Error() string {
+	if e == nil || e.operation == nil {
+		return ""
+	}
+	return e.operation.Error()
 }
 
 func (e *storeOperationError) Unwrap() error {
@@ -409,5 +413,13 @@ func (e *storeOperationError) Unwrap() error {
 }
 
 func (e *storeOperationError) Is(target error) bool {
-	return e != nil && target == indexing.ErrStoreUnavailable
+	return e != nil && target == e.operation
+}
+
+func (e *storeOperationError) GoString() string {
+	return fmt.Sprintf("storeOperationError{%s}", e.Error())
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
