@@ -15,6 +15,8 @@ const (
 	MaxQueryRunes = 4096
 	// MaxTopK 是单次查询允许返回的最大候选数。
 	MaxTopK = 20
+	// StatusCompleted 表示基础向量召回已成功完成。
+	StatusCompleted = "completed"
 )
 
 var (

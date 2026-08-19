@@ -2,35 +2,32 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/signal"
-	pathpkg "path"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/cloudwego/eino-ext/devops"
 	"github.com/google/uuid"
-	ingestion "github.com/wo4zhuzi/eino-document-ingestion"
-	"github.com/wo4zhuzi/eino-document-parser-structured/markdown"
 	appconfig "github.com/wo4zhuzi/eino-flow/internal/config"
 	"github.com/wo4zhuzi/eino-flow/internal/embedding"
 	dbpostgres "github.com/wo4zhuzi/eino-flow/internal/postgres"
-	"github.com/wo4zhuzi/eino-flow/internal/rag/indexing"
 	"github.com/wo4zhuzi/eino-flow/internal/rag/indexstore"
 	indexpostgres "github.com/wo4zhuzi/eino-flow/internal/rag/indexstore/postgres"
+	"github.com/wo4zhuzi/eino-flow/internal/rag/retrieval"
 )
 
 const (
 	einoDevEnv         = "EINO_DEV"
 	devTenantID        = "local-development"
 	devKnowledgeBaseID = "default"
+	defaultQuery       = "Markdown 文档使用什么切分策略？"
+	defaultTopK        = 3
 )
 
 func main() {
@@ -40,9 +37,12 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, output io.Writer) (runErr error) {
-	sourceURI := filepath.Join("testdata", "knowledge.md")
-	if len(args) > 1 {
-		sourceURI = args[1]
+	if ctx == nil {
+		return retrieval.ErrNilContext
+	}
+	query, topK, err := parseArguments(args)
+	if err != nil {
+		return err
 	}
 	einoDevEnabled := os.Getenv(einoDevEnv) == "true"
 	if einoDevEnabled {
@@ -50,6 +50,7 @@ func run(ctx context.Context, args []string, output io.Writer) (runErr error) {
 			return fmt.Errorf("初始化 Eino DevOps: %w", err)
 		}
 	}
+
 	configuration, err := appconfig.Load()
 	if err != nil {
 		return fmt.Errorf("加载运行配置: %w", err)
@@ -82,66 +83,27 @@ func run(ctx context.Context, args []string, output io.Writer) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("创建 Embedding 客户端: %w", err)
 	}
-
-	registry, err := ingestion.NewDefaultRegistry(ctx)
-	if err != nil {
-		return fmt.Errorf("创建默认 Parser 注册表: %w", err)
-	}
-	if err := registry.ReplaceParser(
-		ingestion.ExtensionMarkdown,
-		markdown.ParserInfo(),
-		markdown.New(),
-	); err != nil {
-		return fmt.Errorf("替换结构化 Markdown Parser: %w", err)
-	}
-	ingestor, err := ingestion.New(ctx, ingestion.Config{
-		MaxFileBytes: ingestion.DefaultMaxFileBytes,
-		Registry:     registry,
-	})
-	if err != nil {
-		return fmt.Errorf("创建文档摄取器: %w", err)
-	}
-	chunkConfig := indexing.DefaultChunkConfig()
-	chunker, err := indexing.NewAutomaticChunker(chunkConfig)
-	if err != nil {
-		return fmt.Errorf("创建自动 Chunker: %w", err)
-	}
-	workflow, err := indexing.New(ctx, indexing.Dependencies{
-		Ingestor: ingestor,
-		Chunker:  chunker,
+	workflow, err := retrieval.New(ctx, retrieval.Dependencies{
 		Embedder: embedder,
 		Store:    store,
-		BuildConfig: indexing.BuildConfig{
-			Chunk: chunkConfig,
-			Model: indexing.ModelProfile{
-				Model:         configuration.Embedding().Model(),
-				Dimensions:    configuration.Embedding().Dimensions(),
-				Distance:      indexing.DistanceCosine,
-				ConfigVersion: appconfig.EmbeddingModelConfigVersion,
-			},
-		},
+		Config: retrieval.Config{Model: indexstore.ModelProfile{
+			Model:         configuration.Embedding().Model(),
+			Dimensions:    configuration.Embedding().Dimensions(),
+			Distance:      indexstore.DistanceCosine,
+			ConfigVersion: appconfig.EmbeddingModelConfigVersion,
+		}},
 	})
 	if err != nil {
 		return err
 	}
-	setID := indexstore.SetID(uuid.NewString())
-	if len(args) > 2 {
-		setID = indexstore.SetID(strings.TrimSpace(args[2]))
-	}
-	documentID := stableDocumentID(sourceURI)
-	sourceName := displaySourceName(sourceURI)
-	result, err := workflow.Run(ctx, indexing.Request{
-		RunID:     "rag-index-dev-" + string(setID),
-		SourceURI: sourceURI,
-		Index: indexing.IndexTarget{
-			SetID:           setID,
+	result, err := workflow.Run(ctx, retrieval.Request{
+		RunID: "rag-retrieve-dev-" + uuid.NewString(),
+		Query: query,
+		Scope: indexstore.Scope{
 			TenantID:        devTenantID,
 			KnowledgeBaseID: devKnowledgeBaseID,
-			DocumentID:      documentID,
-			CanonicalURI:    "knowledge://local/" + documentID,
-			SourceName:      sourceName,
-			Title:           strings.TrimSuffix(sourceName, filepath.Ext(sourceName)),
 		},
+		TopK: topK,
 	})
 	if err != nil {
 		return err
@@ -152,29 +114,32 @@ func run(ctx context.Context, args []string, output io.Writer) (runErr error) {
 	if err := encoder.Encode(result); err != nil {
 		return fmt.Errorf("输出工作流结果: %w", err)
 	}
-
 	if einoDevEnabled {
 		waitForEinoDev(ctx)
 	}
 	return nil
 }
 
-func stableDocumentID(sourceURI string) string {
-	digest := sha256.Sum256([]byte(strings.TrimSpace(sourceURI)))
-	return fmt.Sprintf("document-%x", digest[:16])
-}
-
-func displaySourceName(sourceURI string) string {
-	trimmed := strings.TrimSpace(sourceURI)
-	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme != "" {
-		if name := pathpkg.Base(parsed.Path); name != "." && name != "/" && name != "" {
-			return name
+func parseArguments(args []string) (string, int, error) {
+	query := defaultQuery
+	topK := defaultTopK
+	if len(args) > 3 {
+		return "", 0, fmt.Errorf("%w: 只允许查询文本和 TopK 两个参数", retrieval.ErrInvalidRequest)
+	}
+	if len(args) > 1 {
+		query = strings.TrimSpace(args[1])
+	}
+	if len(args) > 2 {
+		parsed, err := strconv.Atoi(strings.TrimSpace(args[2]))
+		if err != nil || parsed < 1 || parsed > retrieval.MaxTopK {
+			return "", 0, fmt.Errorf("%w: TopK 必须在 1 到 %d 之间", retrieval.ErrInvalidRequest, retrieval.MaxTopK)
 		}
+		topK = parsed
 	}
-	if name := filepath.Base(trimmed); name != "." && name != string(filepath.Separator) && name != "" {
-		return name
+	if query == "" {
+		return "", 0, fmt.Errorf("%w: 查询文本不能为空", retrieval.ErrInvalidRequest)
 	}
-	return "document"
+	return query, topK, nil
 }
 
 func waitForEinoDev(parent context.Context) {

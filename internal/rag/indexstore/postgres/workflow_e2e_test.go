@@ -22,12 +22,12 @@ import (
 	dbpostgres "github.com/wo4zhuzi/eino-flow/internal/postgres"
 	"github.com/wo4zhuzi/eino-flow/internal/rag/indexing"
 	"github.com/wo4zhuzi/eino-flow/internal/rag/indexstore"
+	"github.com/wo4zhuzi/eino-flow/internal/rag/retrieval"
 	"gorm.io/gorm"
 )
 
 const (
 	workflowE2EEnv             = "EINO_FLOW_WORKFLOW_E2E"
-	workflowE2EConfigVersion   = "v1"
 	workflowE2ETimeout         = 3 * time.Minute
 	workflowE2ECanonicalPrefix = "knowledge://workflow-e2e/"
 )
@@ -92,6 +92,7 @@ type workflowE2EFixture struct {
 	ingestor         indexing.Ingestor
 	chunker          indexing.Chunker
 	embedder         *countingEmbedder
+	realEmbedder     *embedding.Client
 	buildConfig      indexing.BuildConfig
 	tenantID         string
 	knowledgeID      string
@@ -99,6 +100,74 @@ type workflowE2EFixture struct {
 	markdownV2       string
 	plainText        string
 	expectedModelKey string
+}
+
+func TestRetrievalConfiguredEndToEnd(t *testing.T) {
+	if os.Getenv(workflowE2EEnv) != "1" {
+		t.Skip("需要显式注入运行环境并设置 EINO_FLOW_WORKFLOW_E2E=1")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), workflowE2ETimeout)
+	defer cancel()
+	fixture := newWorkflowE2EFixture(t, ctx)
+	indexWorkflow := fixture.newWorkflow(t, ctx, fixture.realEmbedder, fixture.store)
+	setID := indexstore.SetID(uuid.NewString())
+	knowledgePath := workflowE2EKnowledgePath(t)
+	_, err := indexWorkflow.Run(ctx, fixture.request(
+		"retrieval-index",
+		knowledgePath,
+		setID,
+		"retrieval-document",
+		workflowE2ECanonicalPrefix+fixture.tenantID+"/retrieval",
+	))
+	if err != nil {
+		t.Fatalf("索引 testdata/knowledge.md error = %v", err)
+	}
+	retrievalWorkflow, err := retrieval.New(ctx, retrieval.Dependencies{
+		Embedder: fixture.realEmbedder,
+		Store:    fixture.store,
+		Config: retrieval.Config{Model: indexstore.ModelProfile{
+			Model:         fixture.buildConfig.Model.Model,
+			Dimensions:    fixture.buildConfig.Model.Dimensions,
+			Distance:      indexstore.DistanceCosine,
+			ConfigVersion: appconfig.EmbeddingModelConfigVersion,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("retrieval.New() error = %v", err)
+	}
+	request := retrieval.Request{
+		RunID: fixture.runID("retrieval-query"),
+		Query: "Markdown 文档使用什么切分策略？",
+		Scope: indexstore.Scope{TenantID: fixture.tenantID, KnowledgeBaseID: fixture.knowledgeID},
+		TopK:  3,
+	}
+	result, err := retrievalWorkflow.Run(ctx, request)
+	if err != nil {
+		t.Fatalf("检索已发布 knowledge.md error = %v", err)
+	}
+	containsExpectedEvidence := false
+	for _, item := range result.Evidence {
+		if strings.Contains(item.Content, "结构化 Markdown 使用 Structure-aware Chunk") {
+			containsExpectedEvidence = true
+			break
+		}
+	}
+	if result.Status != retrieval.StatusCompleted || len(result.Evidence) == 0 ||
+		len(result.Evidence) > request.TopK || !containsExpectedEvidence {
+		t.Fatalf("检索结果不满足验收契约: status=%s count=%d expected_evidence=%t", result.Status, len(result.Evidence), containsExpectedEvidence)
+	}
+	emptyRequest := request
+	emptyRequest.RunID = fixture.runID("retrieval-empty")
+	emptyRequest.Scope.KnowledgeBaseID = "missing-knowledge"
+	empty, err := retrievalWorkflow.Run(ctx, emptyRequest)
+	if err != nil {
+		t.Fatalf("检索不存在知识库 error = %v", err)
+	}
+	if empty.Evidence == nil || len(empty.Evidence) != 0 {
+		t.Fatalf("检索不存在知识库 evidence=%d, want non-nil empty", len(empty.Evidence))
+	}
+	t.Logf("基础向量召回验收完成: top_k=%d evidence=%d expected_evidence=%t empty=%d", request.TopK, len(result.Evidence), containsExpectedEvidence, len(empty.Evidence))
 }
 
 func TestWorkflowConfiguredEndToEnd(t *testing.T) {
@@ -334,19 +403,20 @@ func newWorkflowE2EFixture(t *testing.T, ctx context.Context) workflowE2EFixture
 	model := configuration.Embedding().Model()
 	dimensions := configuration.Embedding().Dimensions()
 	return workflowE2EFixture{
-		db:       db,
-		tables:   resolvedTables,
-		store:    store,
-		ingestor: ingestor,
-		chunker:  chunker,
-		embedder: &countingEmbedder{delegate: realEmbedder},
+		db:           db,
+		tables:       resolvedTables,
+		store:        store,
+		ingestor:     ingestor,
+		chunker:      chunker,
+		embedder:     &countingEmbedder{delegate: realEmbedder},
+		realEmbedder: realEmbedder,
 		buildConfig: indexing.BuildConfig{
 			Chunk: chunkConfig,
 			Model: indexing.ModelProfile{
 				Model:         model,
 				Dimensions:    dimensions,
 				Distance:      indexing.DistanceCosine,
-				ConfigVersion: workflowE2EConfigVersion,
+				ConfigVersion: appconfig.EmbeddingModelConfigVersion,
 			},
 		},
 		tenantID:         tenantID,
@@ -591,8 +661,20 @@ func writeWorkflowE2ECorpus(t *testing.T) (string, string, string) {
 	return markdownV1, markdownV2, plainText
 }
 
+func workflowE2EKnowledgePath(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs(filepath.Join("..", "..", "..", "..", "testdata", "knowledge.md"))
+	if err != nil {
+		t.Fatalf("解析 testdata/knowledge.md 路径 error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("读取 testdata/knowledge.md error = %v", err)
+	}
+	return path
+}
+
 func workflowE2EModelKey(model string, dimensions int) string {
-	canonical := fmt.Sprintf("%s\x00%d\x00%s\x00%s", model, dimensions, indexing.DistanceCosine, workflowE2EConfigVersion)
+	canonical := fmt.Sprintf("%s\x00%d\x00%s\x00%s", model, dimensions, indexing.DistanceCosine, appconfig.EmbeddingModelConfigVersion)
 	digest := sha256.Sum256([]byte(canonical))
 	return fmt.Sprintf("%s:%x", model, digest)
 }

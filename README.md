@@ -1,8 +1,8 @@
 # eino-flow
 
-基于 Eino 的通用 AI Workflow 编排层。仓库当前完成了第一个可运行闭环：文档索引工作流。
+基于 Eino 的通用 AI Workflow 编排层。仓库当前完成了文档索引与基础向量召回两个可运行闭环。
 
-当前实现迁移自 `eino-lab` 的 demo19，源快照为 `31aba6b`。仓库已将文档摄取、结构化解析、自动切分、Embedding、持久化、校验和原子发布接成完整索引链路，同时抽取了仓库内部可复用的工作流运行层。
+当前实现迁移自 `eino-lab` 的 demo19，源快照为 `31aba6b`。仓库已将文档摄取、结构化解析、自动切分、Embedding、持久化、校验和原子发布接成完整索引链路，并支持在可信租户与知识库作用域内执行 Query Embedding 和 pgvector TopK 证据召回。
 
 ## 当前能力
 
@@ -16,8 +16,11 @@
 | 索引校验 | 真实 | 校验 Profile、Chunk 关系和 Embedding 完整性 |
 | 索引发布 | 真实 | 按完整作用域串行化并原子切换 active Set |
 | 结果构建 | 真实 | 返回 Parser、Chunk、关系、统计和各阶段状态 |
+| Query Embedding | 真实 | 使用与索引一致的模型空间生成并校验 1536 维查询向量 |
+| 向量召回 | 真实 | 在数据库 TopK 前过滤作用域、active、searchable 和 ModelKey |
+| 证据结果 | 真实 | 返回稳定排序的原始 Chunk 和 cosine distance，无命中返回空集合 |
 
-稳定工作流标识为 `rag_document_indexing@v5`，成功状态为 `published`。
+稳定工作流标识为 `rag_document_indexing@v5` 和 `rag_vector_retrieval@v1`，成功状态分别为 `published` 和 `completed`。
 
 启动入口负责一次性加载配置、连接 PostgreSQL、校验既有 schema、构造 Index Store 和 Embedding 客户端，并在退出时关闭连接。索引工作流只依赖调用方接口和强类型构建配置，不读取环境变量。
 
@@ -27,7 +30,8 @@ Embedding 客户端固定请求 1536 维向量，并校验返回维度。阿里�
 
 ```mermaid
 flowchart TB
-    Entry[cmd/rag-index-dev<br/>本地装配与运行入口]
+    IndexEntry[cmd/rag-index-dev<br/>本地索引入口]
+    RetrievalEntry[cmd/rag-retrieve-dev<br/>本地查询入口]
 
     subgraph Runtime[通用工作流运行能力]
         Runner[Runner<br/>Compile once / Run many]
@@ -48,19 +52,28 @@ flowchart TB
         Ingest --> Chunk --> Prepare --> Embed --> Persist --> Validate --> Publish --> Result
     end
 
+    subgraph Retrieval[RAG 基础向量召回]
+        QueryEmbed[embed_query<br/>真实]
+        Search[retrieve_evidence<br/>真实]
+        RetrievalResult[build_result<br/>真实]
+
+        QueryEmbed --> Search --> RetrievalResult
+    end
+
     subgraph Packages[独立文档处理模块]
         Ingestion[eino-document-ingestion]
         Parser[eino-document-parser-structured]
         Chunking[eino-document-chunking]
     end
 
-    Entry --> Runner --> Ingest
+    IndexEntry --> Runner --> Ingest
+    RetrievalEntry --> Runner --> QueryEmbed
     Ingest --> Ingestion
     Ingestion --> Parser
     Chunk --> Chunking
 
     classDef real fill:#e8f5e9,stroke:#2e7d32,color:#1b1b1b;
-    class Ingest,Chunk,Prepare,Embed,Persist,Validate,Publish,Result real;
+    class Ingest,Chunk,Prepare,Embed,Persist,Validate,Publish,Result,QueryEmbed,Search,RetrievalResult real;
 ```
 
 ## 索引存储核心逻辑
@@ -159,12 +172,14 @@ flowchart TB
 ```text
 .
 ├── cmd/rag-index-dev/          本地运行与 Eino Dev 入口
+├── cmd/rag-retrieve-dev/       本地基础向量召回入口
 ├── governance/                仓库治理规范
 ├── internal/config/           全局运行配置、校验与脱敏
 ├── internal/embedding/        text-embedding-v4 客户端与精确 Token 计量
 ├── internal/postgres/         PostgreSQL 通用连接与生命周期
 ├── internal/workflow/         通用工作流运行能力
 ├── internal/rag/indexing/     RAG 文档索引 Feature
+├── internal/rag/retrieval/    RAG 基础向量召回 Feature
 ├── internal/rag/indexstore/   RAG 索引存储边界
 │   └── postgres/              表映射、schema 校验与构建持久化
 ├── testdata/knowledge.md      默认测试语料
@@ -195,7 +210,7 @@ export EMBEDDING_MODEL='text-embedding-v4'
 
 端口、schema、连接池、Embedding 维度、超时和并发数有安全默认值，完整变量名见 `internal/config/load.go`。
 
-运行默认 Markdown：
+索引默认 Markdown：
 
 ```bash
 go run ./cmd/rag-index-dev
@@ -211,13 +226,23 @@ go run ./cmd/rag-index-dev /absolute/path/to/document.txt 11111111-1111-4111-811
 
 输出包含完整 Chunk 正文，适合本地开发和测试，不应直接作为生产日志格式。
 
+查询默认问题，或显式传入问题与 TopK：
+
+```bash
+go run ./cmd/rag-retrieve-dev
+go run ./cmd/rag-retrieve-dev "Markdown 文档使用什么切分策略？" 3
+```
+
+查询入口固定使用本地开发作用域 `local-development/default`，输出 ModelKey、查询 Token 用量和证据块，不输出查询向量。该入口用于开发验收，不是服务化接口。
+
 ## Eino Dev
 
 ```bash
 EINO_DEV=true go run ./cmd/rag-index-dev
+EINO_DEV=true go run ./cmd/rag-retrieve-dev
 ```
 
-在 Eino Dev 中连接 `127.0.0.1:52538`，选择 `rag_document_indexing@v5`。该模式只用于本地调试，不应暴露到公网。
+在 Eino Dev 中连接 `127.0.0.1:52538`，选择对应的 `rag_document_indexing@v5` 或 `rag_vector_retrieval@v1`。两个入口使用同一开发端口，不应同时启动；该模式只用于本地调试，不应暴露到公网。
 
 ## 验证
 
@@ -227,7 +252,7 @@ go test -race ./... -count=1
 go vet ./...
 ```
 
-默认测试使用内存替身，不访问真实数据库或模型服务。测试覆盖 Markdown Structure-aware、TXT Parent-child、真实节点调用顺序、稳定 ID、同 Set 重试复用、输入不可变性、错误链、超大原子块和公共 Runner 并发复用。
+默认测试使用内存替身，不访问真实数据库或模型服务。测试覆盖 Markdown Structure-aware、TXT Parent-child、真实节点调用顺序、稳定 ID、同 Set 重试复用、输入不可变性、错误链、超大原子块、向量召回边界和公共 Runner 并发复用。
 
 真实端到端验收需要显式注入 PostgreSQL 与 Embedding 配置，并单独开启外部测试。以下命令会使用 UUID 隔离租户，结束后按租户清理 Set、Chunk 和 Embedding；输出不包含密码、API Key、正文或向量：
 
@@ -237,11 +262,11 @@ source .env
 set +a
 EINO_FLOW_WORKFLOW_E2E=1 EINO_FLOW_POSTGRES_INTEGRATION=1 \
   go test ./internal/rag/indexstore/postgres -count=1 \
-  -run 'TestValidateConfiguredDatabase|TestStoreConfiguredDatabaseLifecycle|TestStoreConfiguredDatabaseConcurrentPublish|TestWorkflowConfiguredEndToEnd' -v
+  -run 'TestValidateConfiguredDatabase|TestStoreConfiguredDatabaseLifecycle|TestStoreConfiguredDatabaseConcurrentPublish|TestStoreConfiguredDatabaseRetrievalIsolation|TestWorkflowConfiguredEndToEnd|TestRetrievalConfiguredEndToEnd' -v
 ```
 
-该验收覆盖真实 Markdown Structure-aware 与 TXT Parent-child 构建、发布前中断后的同 Set 重试与向量复用、内容变更后的新旧 Set 原子切换，以及 Embedding 失败不影响已有 active Set。不开启 `EINO_FLOW_WORKFLOW_E2E=1` 时，普通测试不会访问真实外部依赖。
+该验收覆盖真实 Markdown Structure-aware 与 TXT Parent-child 构建、发布前中断后的同 Set 重试与向量复用、内容变更后的新旧 Set 原子切换、Embedding 失败不影响已有 active Set，以及发布后基础向量召回与不存在知识库的空结果。不开启 `EINO_FLOW_WORKFLOW_E2E=1` 时，普通测试不会访问真实外部依赖。
 
 ## 后续演进
 
-真实索引下游的入库边界、表结构、写入校验和发布流程见 [RAG 索引入库设计 V1](docs/designs/rag-index-storage-v1.md)。其余后续方向维护在 [演进计划](docs/plans/2026-08-11-demo19-rag-migration.md)中。当前范围不包含 RAG 查询工作流、混合检索、Rerank 或 Agent。
+真实索引下游的入库边界、表结构、写入校验和发布流程见 [RAG 索引入库设计 V1](docs/designs/rag-index-storage-v1.md)。其余后续方向维护在 [演进计划](docs/plans/2026-08-11-demo19-rag-migration.md)中。当前查询能力只返回基础向量证据，不包含答案生成、引用渲染、上下文扩展、混合检索、Rerank、Agent 或服务化入口。

@@ -40,6 +40,8 @@ const (
 	RequiredEmbeddingModel = "text-embedding-v4"
 	// RequiredEmbeddingDimensions 是当前 vector 列和 HNSW 索引的固定维度。
 	RequiredEmbeddingDimensions = 1536
+	// EmbeddingModelConfigVersion 标识影响当前模型输出兼容性的静态配置版本。
+	EmbeddingModelConfigVersion = "v1"
 	DefaultEmbeddingTimeout     = 30 * time.Second
 	DefaultEmbeddingBatchSize   = 10
 	// MaxEmbeddingBatchSize 是 text-embedding-v4 官方单次输入条数上限。

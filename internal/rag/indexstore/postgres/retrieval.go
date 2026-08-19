@@ -32,32 +32,7 @@ func (s *Store) Search(ctx context.Context, request retrieval.SearchRequest) ([]
 		vector[index] = float32(value)
 	}
 	rows := make([]retrievalRow, 0, request.Limit)
-	err := s.db.WithContext(ctx).Raw(fmt.Sprintf(`
-SELECT
-    ce.chunk_set_id,
-    ce.chunk_id,
-    cs.document_id,
-    cs.source_uri,
-    cs.source_name,
-    c.kind,
-    c.sequence,
-    c.content,
-    c.token_count,
-    c.source_unit_ids,
-    c.metadata,
-    ce.embedding <=> ? AS cosine_distance
-FROM %s AS ce
-JOIN %s AS cs ON cs.id = ce.chunk_set_id
-JOIN %s AS c
-  ON c.chunk_set_id = ce.chunk_set_id
- AND c.chunk_id = ce.chunk_id
-WHERE cs.tenant_id = ?
-  AND cs.knowledge_base_id = ?
-  AND cs.status = 'active'
-  AND ce.searchable = true
-  AND ce.model_key = ?
-ORDER BY cosine_distance ASC, ce.chunk_set_id ASC, ce.chunk_id ASC
-LIMIT ?`, s.tables.ChunkEmbeddings, s.tables.ChunkSets, s.tables.Chunks),
+	err := s.db.WithContext(ctx).Raw(s.searchStatement(),
 		pgvector.NewVector(vector),
 		request.Scope.TenantID,
 		request.Scope.KnowledgeBaseID,
@@ -91,6 +66,35 @@ LIMIT ?`, s.tables.ChunkEmbeddings, s.tables.ChunkSets, s.tables.Chunks),
 		return nil, err
 	}
 	return evidence, nil
+}
+
+func (s *Store) searchStatement() string {
+	return fmt.Sprintf(`
+SELECT
+    ce.chunk_set_id,
+    ce.chunk_id,
+    cs.document_id,
+    cs.source_uri,
+    cs.source_name,
+    c.kind,
+    c.sequence,
+    c.content,
+    c.token_count,
+    c.source_unit_ids,
+    c.metadata,
+    ce.embedding <=> ? AS cosine_distance
+FROM %s AS ce
+JOIN %s AS cs ON cs.id = ce.chunk_set_id
+JOIN %s AS c
+  ON c.chunk_set_id = ce.chunk_set_id
+ AND c.chunk_id = ce.chunk_id
+WHERE cs.tenant_id = ?
+  AND cs.knowledge_base_id = ?
+  AND cs.status = 'active'
+  AND ce.searchable = true
+  AND ce.model_key = ?
+ORDER BY cosine_distance ASC, ce.chunk_set_id ASC, ce.chunk_id ASC
+LIMIT ?`, s.tables.ChunkEmbeddings, s.tables.ChunkSets, s.tables.Chunks)
 }
 
 type retrievalRow struct {

@@ -8,6 +8,7 @@ import (
 const (
 	nodeEmbedQuery       = "embed_query"
 	nodeRetrieveEvidence = "retrieve_evidence"
+	nodeBuildResult      = "build_result"
 )
 
 func (n *workflowNodes) embedQuery(ctx context.Context, request Request) (workflowState, error) {
@@ -62,4 +63,27 @@ func (n *workflowNodes) retrieveEvidence(ctx context.Context, state workflowStat
 	}
 	state.evidence = cloneEvidence(evidence)
 	return state, nil
+}
+
+func (n *workflowNodes) buildResult(ctx context.Context, state workflowState) (Result, error) {
+	if ctx == nil {
+		return Result{}, ErrNilContext
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if err := ValidateEvidence(state.evidence, state.request.TopK); err != nil {
+		return Result{}, fmt.Errorf("%s: %w", nodeBuildResult, err)
+	}
+	if state.request.RunID == "" || state.modelKey == "" || state.queryEmbeddingTokenCount < 1 {
+		return Result{}, fmt.Errorf("%s: %w", nodeBuildResult, ErrInvalidEvidence)
+	}
+	return Result{
+		Workflow:                 Descriptor().String(),
+		RunID:                    state.request.RunID,
+		Status:                   StatusCompleted,
+		ModelKey:                 state.modelKey,
+		QueryEmbeddingTokenCount: state.queryEmbeddingTokenCount,
+		Evidence:                 cloneEvidence(state.evidence),
+	}, nil
 }
